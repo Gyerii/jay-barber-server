@@ -224,3 +224,4 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔥 Firebase Project: jay-the-barber`);
   console.log('========================================\n');
 });
+
