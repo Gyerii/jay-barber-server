@@ -53,6 +53,13 @@ app.post('/store-token', async (req, res) => {
       });
     }
 
+    // Validate token format
+    if (typeof token !== 'string' || token.length < 100) {
+      return res.status(400).json({
+        error: 'Invalid token format'
+      });
+    }
+
     // Store in memory - overwrites if user already exists
     userTokens.set(userId, {
       token,
@@ -156,7 +163,32 @@ app.get('/token-count', async (req, res) => {
   }
 });
 
-// Send to unique users - NO DUPLICATES
+// Validate tokens before sending
+function validateTokens(tokens) {
+  const validTokens = [];
+  const invalidTokens = [];
+  
+  tokens.forEach(token => {
+    if (typeof token === 'string' && 
+        token.length > 100 && 
+        token.startsWith('f')) {
+      validTokens.push(token);
+    } else {
+      invalidTokens.push(token);
+    }
+  });
+  
+  if (invalidTokens.length > 0) {
+    console.log(`⚠️ Invalid tokens found: ${invalidTokens.length}`);
+    invalidTokens.forEach(token => {
+      console.log(`❌ Invalid token: ${token?.substring(0, 50)}...`);
+    });
+  }
+  
+  return validTokens;
+}
+
+// Send to unique users - WITH EXPANDABLE NOTIFICATIONS
 app.post('/send-to-unique-users', async (req, res) => {
   try {
     const { title, body, tokens, userIds } = req.body;
@@ -185,21 +217,27 @@ app.post('/send-to-unique-users', async (req, res) => {
       uniqueTokens = Array.from(tokenSet);
     }
 
+    // Validate tokens before sending
+    uniqueTokens = validateTokens(uniqueTokens);
+
     if (uniqueTokens.length === 0) {
-      console.log('⚠️ No tokens to send');
+      console.log('⚠️ No valid tokens to send');
       return res.status(200).json({
         success: true,
         successCount: 0,
         failureCount: 0,
-        message: 'No registered users'
+        message: 'No valid registered users'
       });
     }
 
-    console.log(`📤 Sending to ${uniqueTokens.length} unique users...`);
+    console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
 
-    // Prepare message
+    // Prepare message with expandable notifications
     const message = {
-      notification: { title, body },
+      notification: { 
+        title, 
+        body
+      },
       android: {
         priority: 'high',
         notification: {
@@ -237,7 +275,8 @@ app.post('/send-to-unique-users', async (req, res) => {
           console.log(`❌ Token ${idx}: ${errorCode}`);
           
           if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered') {
+              errorCode === 'messaging/registration-token-not-registered' ||
+              errorCode === 'messaging/invalid-argument') {
             tokensToRemove.push(uniqueTokens[idx]);
           }
         }
@@ -269,61 +308,143 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// Legacy endpoint - redirects to unique users
-app.post('/send-to-all', async (req, res) => {
+// Enhanced notification with custom messages
+app.post('/send-shop-status', async (req, res) => {
   try {
-    const { title, body } = req.body;
+    const { isOpen } = req.body;
 
-    if (!title || !body) {
-      return res.status(400).json({ error: 'Title and body required' });
+    if (typeof isOpen !== 'boolean') {
+      return res.status(400).json({ error: 'isOpen boolean required' });
     }
 
     // Get unique tokens from Firestore
     const snapshot = await db.collection('fcm_tokens').get();
     const uniqueTokens = [];
+    const userIds = [];
 
     snapshot.forEach(doc => {
       const data = doc.data();
       if (data.token && data.userId) {
         uniqueTokens.push(data.token);
+        userIds.push(data.userId);
       }
     });
 
-    if (uniqueTokens.length === 0) {
+    // Validate tokens
+    const validTokens = validateTokens(uniqueTokens);
+
+    if (validTokens.length === 0) {
       return res.status(200).json({
         success: true,
+        message: 'No valid users to notify',
         successCount: 0,
-        failureCount: 0,
-        totalDevices: 0
+        failureCount: 0
       });
     }
 
+    // Enhanced message content
+    const title = isOpen ? '🏪 Shop is Now OPEN!' : '🚪 Shop is Now CLOSED';
+    const body = isOpen 
+      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! 💈✂️'
+      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋✨';
+
+    console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
+
+    // Enhanced message
     const message = {
-      notification: { title, body },
+      notification: { 
+        title, 
+        body
+      },
       android: {
         priority: 'high',
         notification: {
           channelId: 'shop_status_channel',
           sound: 'default',
-          tag: 'shop_status'
+          priority: 'max',
+          tag: 'shop_status',
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
         }
       },
-      tokens: uniqueTokens
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1
+          }
+        }
+      },
+      data: {
+        type: 'shop_status',
+        status: isOpen ? 'open' : 'closed',
+        timestamp: new Date().toISOString(),
+        click_action: 'FLUTTER_NOTIFICATION_CLICK'
+      },
+      tokens: validTokens
     };
 
     const response = await admin.messaging().sendEachForMulticast(message);
 
-    console.log(`✅ Legacy: Sent to ${response.successCount} users`);
+    console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
+
+    // Cleanup invalid tokens
+    if (response.failureCount > 0) {
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          const errorCode = resp.error?.code;
+          if (errorCode === 'messaging/invalid-registration-token' ||
+              errorCode === 'messaging/registration-token-not-registered' ||
+              errorCode === 'messaging/invalid-argument') {
+            const tokenToRemove = validTokens[idx];
+            const userIdToRemove = userIds[idx];
+            
+            if (userIdToRemove) {
+              userTokens.delete(userIdToRemove);
+              db.collection('fcm_tokens').doc(userIdToRemove).delete();
+              console.log(`🗑️ Removed invalid token for user: ${userIdToRemove}`);
+            }
+          }
+        }
+      });
+    }
 
     res.status(200).json({
       success: true,
+      status: isOpen ? 'open' : 'closed',
       successCount: response.successCount,
       failureCount: response.failureCount,
-      totalDevices: uniqueTokens.length
+      totalUsers: validTokens.length,
+      message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent`
     });
 
   } catch (error) {
-    console.error('❌ Error:', error);
+    console.error('❌ Shop status error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Test endpoint to check tokens
+app.get('/debug-tokens', async (req, res) => {
+  try {
+    const snapshot = await db.collection('fcm_tokens').get();
+    const tokens = [];
+    
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      tokens.push({
+        userId: data.userId,
+        token: data.token ? `${data.token.substring(0, 50)}...` : 'MISSING',
+        role: data.role,
+        isValid: data.token && typeof data.token === 'string' && data.token.length > 100
+      });
+    });
+
+    res.status(200).json({
+      totalTokens: snapshot.size,
+      tokens: tokens
+    });
+  } catch (error) {
+    console.error('❌ Debug error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -333,16 +454,23 @@ app.get('/', (req, res) => {
   res.status(200).json({ 
     status: 'Server running',
     uniqueUsers: userTokens.size,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    port: process.env.PORT,
+    features: {
+      expandableNotifications: true,
+      enhancedMessages: true,
+      tokenValidation: true
+    }
   });
 });
 
-// Start server
-const PORT = process.env.PORT || 3000;
+// Start server - Use Render's port
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
+  console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
   
   // Sync tokens on startup
   syncTokens();
@@ -368,6 +496,12 @@ async function syncTokens() {
     });
     
     console.log(`✅ Synced ${userTokens.size} unique users from Firestore`);
+    
+    // Validate all tokens
+    const allTokens = Array.from(userTokens.values()).map(u => u.token);
+    const validTokens = validateTokens(allTokens);
+    console.log(`🔍 Token validation: ${validTokens.length}/${allTokens.length} valid tokens`);
+    
   } catch (error) {
     console.error('❌ Sync error:', error);
   }
