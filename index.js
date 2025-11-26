@@ -308,7 +308,7 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// Enhanced notification with custom messages AND COLORS
+// Enhanced notification with custom messages
 app.post('/send-shop-status', async (req, res) => {
   try {
     const { isOpen } = req.body;
@@ -342,20 +342,15 @@ app.post('/send-shop-status', async (req, res) => {
       });
     }
 
-    // Enhanced message content with emojis
-    const title = isOpen ? '🏪 Shop is Now OPEN!' : '🚪 Shop is Now CLOSED';
+    // Enhanced message content
+    const title = isOpen ? 'Shop is Now OPEN!' : 'Shop is Now CLOSED';
     const body = isOpen 
-      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! 💈✂️'
-      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋✨';
-
-    // Colors for notifications - Green for OPEN, Red for CLOSED
-    const notificationColor = isOpen ? '#10B981' : '#EF4444'; // Green for open, Red for closed
-    const accentColor = isOpen ? '#059669' : '#DC2626'; // Darker green/red for accents
+      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! ✂️'
+      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
-    console.log(`🎨 Notification color: ${notificationColor}`);
 
-    // Enhanced message with colors
+    // Enhanced message
     const message = {
       notification: { 
         title, 
@@ -368,46 +363,14 @@ app.post('/send-shop-status', async (req, res) => {
           sound: 'default',
           priority: 'max',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          color: notificationColor,
-          // Android-specific expandable notification settings
-          style: 'bigText',
-          bigText: body,
-          summaryText: isOpen ? 'Shop Opening Alert' : 'Shop Closing Alert'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1,
-            alert: {
-              title: title,
-              body: body,
-            },
-            // iOS can use category for different actions
-            category: isOpen ? 'SHOP_OPEN' : 'SHOP_CLOSED'
-          }
-        }
-      },
-      webpush: {
-        notification: {
-          title: title,
-          body: body,
-          icon: 'https://your-app-icon.png',
-          badge: 'https://your-badge-icon.png',
-          tag: 'shop_status',
-          requireInteraction: true,
-          actions: [
-            {
-              action: 'view',
-              title: isOpen ? 'Visit Shop' : 'See Tomorrow'
-            }
-          ],
-          // Web push can use data for colors
-          data: {
-            color: notificationColor,
-            accentColor: accentColor
+            badge: 1
           }
         }
       },
@@ -415,11 +378,7 @@ app.post('/send-shop-status', async (req, res) => {
         type: 'shop_status',
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
-        click_action: 'FLUTTER_NOTIFICATION_CLICK',
-        // Include color information for Flutter app
-        notification_color: notificationColor,
-        accent_color: accentColor,
-        is_open: isOpen.toString()
+        click_action: 'FLUTTER_NOTIFICATION_CLICK'
       },
       tokens: validTokens
     };
@@ -427,7 +386,6 @@ app.post('/send-shop-status', async (req, res) => {
     const response = await admin.messaging().sendEachForMulticast(message);
 
     console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
-    console.log(`🎨 Color applied: ${isOpen ? 'GREEN (Open)' : 'RED (Closed)'}`);
 
     // Cleanup invalid tokens
     if (response.failureCount > 0) {
@@ -456,8 +414,7 @@ app.post('/send-shop-status', async (req, res) => {
       successCount: response.successCount,
       failureCount: response.failureCount,
       totalUsers: validTokens.length,
-      notificationColor: notificationColor,
-      message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent with ${isOpen ? 'green' : 'red'} color`
+      message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent`
     });
 
   } catch (error) {
@@ -502,8 +459,7 @@ app.get('/', (req, res) => {
     features: {
       expandableNotifications: true,
       enhancedMessages: true,
-      tokenValidation: true,
-      coloredNotifications: true
+      tokenValidation: true
     }
   });
 });
@@ -514,8 +470,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
-  console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation, Colored Notifications`);
-  console.log(`🎨 Colors: OPEN = Green (#10B981), CLOSED = Red (#EF4444)`);
+  console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
   
   // Sync tokens on startup
   syncTokens();
