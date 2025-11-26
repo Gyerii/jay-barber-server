@@ -6,30 +6,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize Firebase Admin with environment variables
-let serviceAccount;
-
-if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT) {
-  // Production: Use environment variable (Render.com)
-  try {
-    const envVar = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT;
-    serviceAccount = JSON.parse(envVar);
-    console.log('✅ Using Firebase credentials from environment variable');
-  } catch (error) {
-    console.error('❌ Error parsing Firebase credentials:', error);
-    process.exit(1);
-  }
-} else {
-  // Development: Use local file
-  try {
-    serviceAccount = require('./serviceAccountKey.json');
-    console.log('✅ Using Firebase credentials from local file');
-  } catch (error) {
-    console.error('❌ serviceAccountKey.json not found and no environment variable set');
-    console.error('Please set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT environment variable');
-    process.exit(1);
-  }
-}
+// Initialize Firebase Admin
+const serviceAccount = require('./serviceAccountKey.json');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
