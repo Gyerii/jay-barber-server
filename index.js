@@ -156,7 +156,7 @@ app.get('/token-count', async (req, res) => {
   }
 });
 
-// Send to unique users - WITH EXPANDABLE NOTIFICATIONS
+// Send to unique users - NO DUPLICATES
 app.post('/send-to-unique-users', async (req, res) => {
   try {
     const { title, body, tokens, userIds } = req.body;
@@ -197,12 +197,9 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} unique users...`);
 
-    // Prepare message with expandable notification style
+    // Prepare message
     const message = {
-      notification: { 
-        title, 
-        body 
-      },
+      notification: { title, body },
       android: {
         priority: 'high',
         notification: {
@@ -210,35 +207,15 @@ app.post('/send-to-unique-users', async (req, res) => {
           sound: 'default',
           priority: 'max',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          // Enable expandable notifications
-          style: 'bigText',
-          bigText: body,
-          summaryText: 'Tap to view full message'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1,
-            // iOS expandable notification
-            alert: {
-              title: title,
-              body: body,
-              'launch-image': 'default'
-            }
+            badge: 1
           }
-        }
-      },
-      webpush: {
-        headers: {
-          Urgency: 'high'
-        },
-        notification: {
-          body: body,
-          requireInteraction: true,
-          icon: 'https://your-app-icon.png'
         }
       },
       tokens: uniqueTokens
@@ -328,9 +305,7 @@ app.post('/send-to-all', async (req, res) => {
         notification: {
           channelId: 'shop_status_channel',
           sound: 'default',
-          tag: 'shop_status',
-          style: 'bigText',
-          bigText: body
+          tag: 'shop_status'
         }
       },
       tokens: uniqueTokens
