@@ -156,7 +156,7 @@ app.get('/token-count', async (req, res) => {
   }
 });
 
-// Send to unique users - WITH EXPANDABLE NOTIFICATIONS
+// Send to unique users - NO DUPLICATES
 app.post('/send-to-unique-users', async (req, res) => {
   try {
     const { title, body, tokens, userIds } = req.body;
@@ -197,14 +197,9 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} unique users...`);
 
-    // Prepare message with expandable notifications
+    // Prepare message
     const message = {
-      notification: { 
-        title, 
-        body,
-        // Add tag to replace previous notifications
-        tag: 'shop_status'
-      },
+      notification: { title, body },
       android: {
         priority: 'high',
         notification: {
@@ -212,49 +207,16 @@ app.post('/send-to-unique-users', async (req, res) => {
           sound: 'default',
           priority: 'max',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          // EXPANDABLE NOTIFICATIONS - BigTextStyle
-          style: 'bigText',
-          bigText: body,
-          summaryText: 'Shop Status Update'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1,
-            // iOS expandable content
-            alert: {
-              title: title,
-              body: body,
-              'launch-image': 'default'
-            }
+            badge: 1
           }
         }
-      },
-      webpush: {
-        notification: {
-          title: title,
-          body: body,
-          icon: 'https://your-app-icon.png',
-          badge: 'https://your-badge-icon.png',
-          tag: 'shop_status',
-          requireInteraction: true,
-          actions: [
-            {
-              action: 'view',
-              title: 'View Details'
-            }
-          ]
-        }
-      },
-      data: {
-        type: 'shop_status',
-        timestamp: new Date().toISOString(),
-        // Additional data for expandable content
-        expandedContent: body,
-        click_action: 'FLUTTER_NOTIFICATION_CLICK'
       },
       tokens: uniqueTokens
     };
@@ -307,148 +269,6 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// Enhanced notification with custom messages
-app.post('/send-shop-status', async (req, res) => {
-  try {
-    const { isOpen } = req.body;
-
-    if (typeof isOpen !== 'boolean') {
-      return res.status(400).json({ error: 'isOpen boolean required' });
-    }
-
-    // Get unique tokens from Firestore
-    const snapshot = await db.collection('fcm_tokens').get();
-    const uniqueTokens = [];
-    const userIds = [];
-
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.token && data.userId) {
-        uniqueTokens.push(data.token);
-        userIds.push(data.userId);
-      }
-    });
-
-    if (uniqueTokens.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No users to notify',
-        successCount: 0,
-        failureCount: 0
-      });
-    }
-
-    // Enhanced message content
-    const title = isOpen ? '🏪 Shop is Now OPEN!' : '🚪 Shop is Now CLOSED';
-    const body = isOpen 
-      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! 💈✂️'
-      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋✨';
-
-    console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${uniqueTokens.length} users`);
-
-    // Enhanced message with expandable notifications
-    const message = {
-      notification: { 
-        title, 
-        body,
-        tag: 'shop_status'
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'shop_status_channel',
-          sound: 'default',
-          priority: 'max',
-          tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          // EXPANDABLE NOTIFICATIONS
-          style: 'bigText',
-          bigText: body,
-          summaryText: isOpen ? 'Shop Opening Alert' : 'Shop Closing Alert',
-          largeIcon: 'ic_launcher',
-          color: isOpen ? '#10B981' : '#EF4444'
-        }
-      },
-      apns: {
-        payload: {
-          aps: {
-            sound: 'default',
-            badge: 1,
-            alert: {
-              title: title,
-              body: body,
-              'launch-image': 'default'
-            },
-            'mutable-content': 1
-          }
-        }
-      },
-      webpush: {
-        notification: {
-          title: title,
-          body: body,
-          icon: 'https://your-app-icon.png',
-          badge: 'https://your-badge-icon.png',
-          tag: 'shop_status',
-          requireInteraction: true,
-          vibrate: [200, 100, 200],
-          actions: [
-            {
-              action: 'view',
-              title: 'View Details'
-            }
-          ]
-        }
-      },
-      data: {
-        type: 'shop_status',
-        status: isOpen ? 'open' : 'closed',
-        timestamp: new Date().toISOString(),
-        expandedContent: body,
-        click_action: 'FLUTTER_NOTIFICATION_CLICK'
-      },
-      tokens: uniqueTokens
-    };
-
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
-
-    // Cleanup invalid tokens
-    if (response.failureCount > 0) {
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const errorCode = resp.error?.code;
-          if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered') {
-            const tokenToRemove = uniqueTokens[idx];
-            const userIdToRemove = userIds[idx];
-            
-            if (userIdToRemove) {
-              userTokens.delete(userIdToRemove);
-              db.collection('fcm_tokens').doc(userIdToRemove).delete();
-              console.log(`🗑️ Removed invalid token for user: ${userIdToRemove}`);
-            }
-          }
-        }
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      status: isOpen ? 'open' : 'closed',
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      totalUsers: uniqueTokens.length,
-      message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent`
-    });
-
-  } catch (error) {
-    console.error('❌ Shop status error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Legacy endpoint - redirects to unique users
 app.post('/send-to-all', async (req, res) => {
   try {
@@ -485,9 +305,7 @@ app.post('/send-to-all', async (req, res) => {
         notification: {
           channelId: 'shop_status_channel',
           sound: 'default',
-          tag: 'shop_status',
-          style: 'bigText',
-          bigText: body
+          tag: 'shop_status'
         }
       },
       tokens: uniqueTokens
@@ -515,12 +333,7 @@ app.get('/', (req, res) => {
   res.status(200).json({ 
     status: 'Server running',
     uniqueUsers: userTokens.size,
-    timestamp: new Date().toISOString(),
-    features: {
-      expandableNotifications: true,
-      bigTextStyle: true,
-      enhancedMessages: true
-    }
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -530,7 +343,6 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
-  console.log(`✨ Features: Expandable Notifications, BigText Style, Enhanced Messages`);
   
   // Sync tokens on startup
   syncTokens();
