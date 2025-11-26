@@ -343,10 +343,10 @@ app.post('/send-shop-status', async (req, res) => {
     }
 
     // Enhanced message content
-    const title = isOpen ? '🏪 Shop is Now OPEN!' : '🚪 Shop is Now CLOSED';
+    const title = isOpen ? 'Shop is Now OPEN!' : 'Shop is Now CLOSED';
     const body = isOpen 
-      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! 💈✂️'
-      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋✨';
+      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! ✂️'
+      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
