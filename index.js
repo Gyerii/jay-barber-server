@@ -1,363 +1,169 @@
+// ============================
+// IMPORTS
+// ============================
 const express = require('express');
-const admin = require('firebase-admin');
+const bodyParser = require('body-parser');
 const cors = require('cors');
+const admin = require('firebase-admin');
+require('dotenv').config(); // Load .env variables
 
 const app = express();
+
+// ============================
+// MIDDLEWARE
+// ============================
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
 
-// Initialize Firebase Admin
-const serviceAccount = require('./serviceAccountKey.json');
+// ============================
+// FIREBASE ADMIN INITIALIZATION
+// ============================
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+// Load service account from environment variable
+if (!process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  console.error('❌ FIREBASE_SERVICE_ACCOUNT_JSON is missing in environment variables.');
+  process.exit(1);
+}
+
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+} catch (err) {
+  console.error('❌ Invalid FIREBASE_SERVICE_ACCOUNT_JSON:', err);
+  process.exit(1);
+}
+
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('✅ Firebase Admin initialized successfully!');
+} catch (error) {
+  console.error('❌ Firebase Admin initialization failed:', error);
+  process.exit(1);
+}
 
 const db = admin.firestore();
+const messaging = admin.messaging();
 
-// Memory storage for quick access
-const userTokens = new Map(); // userId -> token
-
-console.log('🚀 Firebase Admin initialized');
-
-// Store token - ONE per user
-app.post('/store-token', async (req, res) => {
-  try {
-    const { token, userId, role, deviceInfo } = req.body;
-
-    if (!token || !userId) {
-      return res.status(400).json({ 
-        error: 'Token and userId required'
-      });
-    }
-
-    // Store in memory - overwrites if user already exists
-    userTokens.set(userId, {
-      token,
-      userId,
-      role: role || 'user',
-      deviceInfo: deviceInfo || {},
-      lastUpdated: new Date().toISOString()
-    });
-
-    // Store in Firestore with userId as document ID
-    await db.collection('fcm_tokens').doc(userId).set({
-      token,
-      userId,
-      role: role || 'user',
-      platform: deviceInfo?.platform || 'unknown',
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-
-    console.log(`✅ Token stored for: ${userId} (${role || 'user'})`);
-    console.log(`📊 Total unique users: ${userTokens.size}`);
-
-    res.status(200).json({ 
-      success: true,
-      userId,
-      uniqueUsers: userTokens.size
-    });
-
-  } catch (error) {
-    console.error('❌ Store error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Remove token
-app.post('/remove-token', async (req, res) => {
-  try {
-    const { token, userId } = req.body;
-
-    if (userId) {
-      userTokens.delete(userId);
-      await db.collection('fcm_tokens').doc(userId).delete();
-      console.log(`🗑️ Removed: ${userId}`);
-    } else if (token) {
-      // Find by token
-      for (let [key, value] of userTokens.entries()) {
-        if (value.token === token) {
-          userTokens.delete(key);
-          await db.collection('fcm_tokens').doc(key).delete();
-          console.log(`🗑️ Removed by token: ${key}`);
-          break;
-        }
-      }
-    }
-
-    console.log(`📊 Remaining users: ${userTokens.size}`);
-
-    res.status(200).json({ 
-      success: true,
-      remainingUsers: userTokens.size
-    });
-
-  } catch (error) {
-    console.error('❌ Remove error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get user count
-app.get('/token-count', async (req, res) => {
-  try {
-    // Sync with Firestore
-    const snapshot = await db.collection('fcm_tokens').get();
-    
-    userTokens.clear();
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.userId && data.token) {
-        userTokens.set(data.userId, {
-          token: data.token,
-          userId: data.userId,
-          role: data.role || 'user',
-          deviceInfo: {},
-          lastUpdated: data.updatedAt
-        });
-      }
-    });
-
-    const uniqueUsers = userTokens.size;
-
-    console.log(`📊 Unique users: ${uniqueUsers}`);
-
-    res.status(200).json({ 
-      activeTokens: uniqueUsers,
-      uniqueUsers: uniqueUsers,
-      totalDevices: snapshot.size
-    });
-
-  } catch (error) {
-    console.error('❌ Count error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Send to unique users - NO DUPLICATES
-app.post('/send-to-unique-users', async (req, res) => {
-  try {
-    const { title, body, tokens, userIds } = req.body;
-
-    if (!title || !body) {
-      return res.status(400).json({ error: 'Title and body required' });
-    }
-
-    let uniqueTokens = [];
-
-    if (tokens && Array.isArray(tokens)) {
-      // Use provided tokens (already unique)
-      uniqueTokens = [...new Set(tokens)];
-    } else {
-      // Get from Firestore
-      const snapshot = await db.collection('fcm_tokens').get();
-      const tokenSet = new Set();
-
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.token && data.userId) {
-          tokenSet.add(data.token);
-        }
-      });
-
-      uniqueTokens = Array.from(tokenSet);
-    }
-
-    if (uniqueTokens.length === 0) {
-      console.log('⚠️ No tokens to send');
-      return res.status(200).json({
-        success: true,
-        successCount: 0,
-        failureCount: 0,
-        message: 'No registered users'
-      });
-    }
-
-    console.log(`📤 Sending to ${uniqueTokens.length} unique users...`);
-
-    // Prepare message
-    const message = {
-      notification: { title, body },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'shop_status_channel',
-          sound: 'default',
-          priority: 'max',
-          tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-        }
-      },
-      apns: {
-        payload: {
-          aps: {
-            sound: 'default',
-            badge: 1
-          }
-        }
-      },
-      tokens: uniqueTokens
-    };
-
-    // Send notification
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Success: ${response.successCount}`);
-    console.log(`❌ Failed: ${response.failureCount}`);
-
-    // Remove invalid tokens
-    if (response.failureCount > 0) {
-      const tokensToRemove = [];
-      
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const errorCode = resp.error?.code;
-          console.log(`❌ Token ${idx}: ${errorCode}`);
-          
-          if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered') {
-            tokensToRemove.push(uniqueTokens[idx]);
-          }
-        }
-      });
-
-      // Clean up invalid tokens
-      for (const token of tokensToRemove) {
-        for (let [userId, data] of userTokens.entries()) {
-          if (data.token === token) {
-            userTokens.delete(userId);
-            await db.collection('fcm_tokens').doc(userId).delete();
-            console.log(`🗑️ Cleaned invalid token: ${userId}`);
-            break;
-          }
-        }
-      }
-    }
-
-    res.status(200).json({
-      success: true,
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      uniqueUsers: uniqueTokens.length
-    });
-
-  } catch (error) {
-    console.error('❌ Send error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Legacy endpoint - redirects to unique users
-app.post('/send-to-all', async (req, res) => {
-  try {
-    const { title, body } = req.body;
-
-    if (!title || !body) {
-      return res.status(400).json({ error: 'Title and body required' });
-    }
-
-    // Get unique tokens from Firestore
-    const snapshot = await db.collection('fcm_tokens').get();
-    const uniqueTokens = [];
-
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.token && data.userId) {
-        uniqueTokens.push(data.token);
-      }
-    });
-
-    if (uniqueTokens.length === 0) {
-      return res.status(200).json({
-        success: true,
-        successCount: 0,
-        failureCount: 0,
-        totalDevices: 0
-      });
-    }
-
-    const message = {
-      notification: { title, body },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'shop_status_channel',
-          sound: 'default',
-          tag: 'shop_status'
-        }
-      },
-      tokens: uniqueTokens
-    };
-
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Legacy: Sent to ${response.successCount} users`);
-
-    res.status(200).json({
-      success: true,
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      totalDevices: uniqueTokens.length
-    });
-
-  } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Health check
+// ============================
+// HEALTH CHECK
+// ============================
 app.get('/', (req, res) => {
-  res.status(200).json({ 
-    status: 'Server running',
-    uniqueUsers: userTokens.size,
+  res.json({
+    status: 'Online 🟢',
+    message: 'Notification Server is Running!',
     timestamp: new Date().toISOString()
   });
 });
 
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Notification service ready`);
-  console.log(`👥 Unique users: ${userTokens.size}`);
-  
-  // Sync tokens on startup
-  syncTokens();
-});
-
-// Sync tokens from Firestore on startup
-async function syncTokens() {
+// ============================
+// STORE FCM TOKEN
+// ============================
+app.post('/store-token', async (req, res) => {
   try {
-    const snapshot = await db.collection('fcm_tokens').get();
-    
-    userTokens.clear();
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.userId && data.token) {
-        userTokens.set(data.userId, {
-          token: data.token,
-          userId: data.userId,
-          role: data.role || 'user',
-          deviceInfo: {},
-          lastUpdated: data.updatedAt
-        });
-      }
-    });
-    
-    console.log(`✅ Synced ${userTokens.size} unique users from Firestore`);
-  } catch (error) {
-    console.error('❌ Sync error:', error);
-  }
-}
+    const { userId, token, deviceInfo } = req.body;
+    if (!token) return res.status(400).json({ success: false, error: 'FCM token is required' });
 
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('👋 Shutting down gracefully...');
-  process.exit(0);
+    const tokenData = {
+      token,
+      userId: userId || 'anonymous',
+      deviceInfo: deviceInfo || {},
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      isActive: true
+    };
+
+    await db.collection('fcm_tokens').doc(token).set(tokenData);
+    console.log(`✅ FCM token stored for user: ${userId || 'anonymous'}`);
+
+    res.json({ success: true, message: 'FCM token stored successfully' });
+  } catch (error) {
+    console.error('❌ Error storing token:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
-process.on('SIGINT', () => {
-  console.log('👋 Shutting down gracefully...');
-  process.exit(0);
+// ============================
+// TEST FIRESTORE CONNECTION
+// ============================
+app.get('/test-firestore', async (req, res) => {
+  try {
+    await db.collection('server_tests').doc('connection_test').set({
+      message: 'Firestore connection successful',
+      timestamp: new Date().toISOString()
+    });
+
+    const tokensSnapshot = await db.collection('fcm_tokens').get();
+
+    res.json({
+      success: true,
+      firestore: 'Connected ✅',
+      tokensCount: tokensSnapshot.size
+    });
+  } catch (error) {
+    console.error('❌ Firestore test failed:', error);
+    res.status(500).json({ success: false, error: error.message, code: error.code });
+  }
+});
+
+// ============================
+// GET TOKEN COUNT
+// ============================
+app.get('/token-count', async (req, res) => {
+  try {
+    const tokensSnapshot = await db.collection('fcm_tokens').get();
+    const activeTokens = tokensSnapshot.size;
+
+    res.json({
+      success: true,
+      activeTokens,
+      message: activeTokens === 0
+        ? 'No FCM tokens stored yet'
+        : `${activeTokens} devices registered`
+    });
+  } catch (error) {
+    console.error('❌ Error getting token count:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================
+// SEND NOTIFICATIONS TO ALL
+// ============================
+app.post('/send-to-all', async (req, res) => {
+  try {
+    const { title, body } = req.body;
+    if (!title || !body) return res.status(400).json({ success: false, error: 'Title and body are required' });
+
+    const tokensSnapshot = await db.collection('fcm_tokens').get();
+    const tokens = tokensSnapshot.docs.map(doc => doc.data().token).filter(Boolean);
+
+    if (tokens.length === 0) {
+      return res.json({ success: true, successCount: 0, failureCount: 0, totalDevices: 0, message: 'No devices registered for notifications yet' });
+    }
+
+    const message = { notification: { title, body }, tokens };
+    const response = await messaging.sendEachForMulticast(message);
+
+    console.log(`✅ Broadcast completed: ${response.successCount} success, ${response.failureCount} failed`);
+    res.json({
+      success: true,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      totalDevices: tokens.length,
+      message: `Sent to ${response.successCount} of ${tokens.length} devices`
+    });
+  } catch (error) {
+    console.error('❌ Error in send-to-all:', error);
+    res.status(500).json({ success: false, error: error.message, code: error.code });
+  }
+});
+
+// ============================
+// SERVER START
+// ============================
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
