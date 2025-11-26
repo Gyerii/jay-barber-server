@@ -10,7 +10,6 @@ app.use(express.json());
 let serviceAccount;
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT) {
-  // Production: Use environment variable (Render.com)
   try {
     const envVar = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_ACCOUNT;
     serviceAccount = JSON.parse(envVar);
@@ -20,13 +19,11 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON || process.env.FIREBASE_SERVICE_AC
     process.exit(1);
   }
 } else {
-  // Development: Use local file
   try {
     serviceAccount = require('./serviceAccountKey.json');
     console.log('✅ Using Firebase credentials from local file');
   } catch (error) {
     console.error('❌ serviceAccountKey.json not found and no environment variable set');
-    console.error('Please set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT environment variable');
     process.exit(1);
   }
 }
@@ -36,9 +33,7 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-
-// Memory storage for quick access
-const userTokens = new Map(); // userId -> token
+const userTokens = new Map();
 
 console.log('🚀 Firebase Admin initialized');
 
@@ -53,14 +48,14 @@ app.post('/store-token', async (req, res) => {
       });
     }
 
-    // Validate token format
-    if (typeof token !== 'string' || token.length < 100) {
+    // More lenient token validation
+    if (typeof token !== 'string' || token.length < 50) {
       return res.status(400).json({
         error: 'Invalid token format'
       });
     }
 
-    // Store in memory - overwrites if user already exists
+    // Store in memory
     userTokens.set(userId, {
       token,
       userId,
@@ -69,7 +64,7 @@ app.post('/store-token', async (req, res) => {
       lastUpdated: new Date().toISOString()
     });
 
-    // Store in Firestore with userId as document ID
+    // Store in Firestore
     await db.collection('fcm_tokens').doc(userId).set({
       token,
       userId,
@@ -102,16 +97,6 @@ app.post('/remove-token', async (req, res) => {
       userTokens.delete(userId);
       await db.collection('fcm_tokens').doc(userId).delete();
       console.log(`🗑️ Removed: ${userId}`);
-    } else if (token) {
-      // Find by token
-      for (let [key, value] of userTokens.entries()) {
-        if (value.token === token) {
-          userTokens.delete(key);
-          await db.collection('fcm_tokens').doc(key).delete();
-          console.log(`🗑️ Removed by token: ${key}`);
-          break;
-        }
-      }
     }
 
     console.log(`📊 Remaining users: ${userTokens.size}`);
@@ -130,7 +115,6 @@ app.post('/remove-token', async (req, res) => {
 // Get user count
 app.get('/token-count', async (req, res) => {
   try {
-    // Sync with Firestore
     const snapshot = await db.collection('fcm_tokens').get();
     
     userTokens.clear();
@@ -163,15 +147,14 @@ app.get('/token-count', async (req, res) => {
   }
 });
 
-// Validate tokens before sending
+// More lenient token validation
 function validateTokens(tokens) {
   const validTokens = [];
   const invalidTokens = [];
   
   tokens.forEach(token => {
-    if (typeof token === 'string' && 
-        token.length > 100 && 
-        token.startsWith('f')) {
+    // More lenient validation - just check if it's a string and has reasonable length
+    if (typeof token === 'string' && token.length > 10) {
       validTokens.push(token);
     } else {
       invalidTokens.push(token);
@@ -180,135 +163,12 @@ function validateTokens(tokens) {
   
   if (invalidTokens.length > 0) {
     console.log(`⚠️ Invalid tokens found: ${invalidTokens.length}`);
-    invalidTokens.forEach(token => {
-      console.log(`❌ Invalid token: ${token?.substring(0, 50)}...`);
-    });
   }
   
   return validTokens;
 }
 
-// Send to unique users - WITH EXPANDABLE NOTIFICATIONS
-app.post('/send-to-unique-users', async (req, res) => {
-  try {
-    const { title, body, tokens, userIds } = req.body;
-
-    if (!title || !body) {
-      return res.status(400).json({ error: 'Title and body required' });
-    }
-
-    let uniqueTokens = [];
-
-    if (tokens && Array.isArray(tokens)) {
-      // Use provided tokens (already unique)
-      uniqueTokens = [...new Set(tokens)];
-    } else {
-      // Get from Firestore
-      const snapshot = await db.collection('fcm_tokens').get();
-      const tokenSet = new Set();
-
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.token && data.userId) {
-          tokenSet.add(data.token);
-        }
-      });
-
-      uniqueTokens = Array.from(tokenSet);
-    }
-
-    // Validate tokens before sending
-    uniqueTokens = validateTokens(uniqueTokens);
-
-    if (uniqueTokens.length === 0) {
-      console.log('⚠️ No valid tokens to send');
-      return res.status(200).json({
-        success: true,
-        successCount: 0,
-        failureCount: 0,
-        message: 'No valid registered users'
-      });
-    }
-
-    console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
-
-    // Prepare message with expandable notifications
-    const message = {
-      notification: { 
-        title, 
-        body
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'shop_status_channel',
-          sound: 'default',
-          priority: 'max',
-          tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-        }
-      },
-      apns: {
-        payload: {
-          aps: {
-            sound: 'default',
-            badge: 1
-          }
-        }
-      },
-      tokens: uniqueTokens
-    };
-
-    // Send notification
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Success: ${response.successCount}`);
-    console.log(`❌ Failed: ${response.failureCount}`);
-
-    // Remove invalid tokens
-    if (response.failureCount > 0) {
-      const tokensToRemove = [];
-      
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const errorCode = resp.error?.code;
-          console.log(`❌ Token ${idx}: ${errorCode}`);
-          
-          if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered' ||
-              errorCode === 'messaging/invalid-argument') {
-            tokensToRemove.push(uniqueTokens[idx]);
-          }
-        }
-      });
-
-      // Clean up invalid tokens
-      for (const token of tokensToRemove) {
-        for (let [userId, data] of userTokens.entries()) {
-          if (data.token === token) {
-            userTokens.delete(userId);
-            await db.collection('fcm_tokens').doc(userId).delete();
-            console.log(`🗑️ Cleaned invalid token: ${userId}`);
-            break;
-          }
-        }
-      }
-    }
-
-    res.status(200).json({
-      success: true,
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      uniqueUsers: uniqueTokens.length
-    });
-
-  } catch (error) {
-    console.error('❌ Send error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Enhanced notification with custom messages
+// Enhanced notification with custom messages AND COLORS
 app.post('/send-shop-status', async (req, res) => {
   try {
     const { isOpen } = req.body;
@@ -330,7 +190,7 @@ app.post('/send-shop-status', async (req, res) => {
       }
     });
 
-    // Validate tokens
+    // Validate tokens with lenient validation
     const validTokens = validateTokens(uniqueTokens);
 
     if (validTokens.length === 0) {
@@ -342,15 +202,19 @@ app.post('/send-shop-status', async (req, res) => {
       });
     }
 
-    // Enhanced message content
-    const title = isOpen ? 'Shop is Now OPEN!' : 'Shop is Now CLOSED';
+    // Enhanced message content with emojis
+    const title = isOpen ? '🏪 Shop is Now OPEN!' : '🚪 Shop is Now CLOSED';
     const body = isOpen 
-      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! ✂️'
-      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
+      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! 💈✂️'
+      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋✨';
 
-    console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
+    // Colors for notifications - Green for OPEN, Red for CLOSED
+    const notificationColor = isOpen ? '#10B981' : '#EF4444';
 
-    // Enhanced message
+    console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} users`);
+    console.log(`🎨 Notification color: ${notificationColor}`);
+
+    // Enhanced message with colors
     const message = {
       notification: { 
         title, 
@@ -361,16 +225,17 @@ app.post('/send-shop-status', async (req, res) => {
         notification: {
           channelId: 'shop_status_channel',
           sound: 'default',
-          priority: 'max',
+          priority: 'high',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+          color: notificationColor,
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1
+            badge: 1,
           }
         }
       },
@@ -378,44 +243,66 @@ app.post('/send-shop-status', async (req, res) => {
         type: 'shop_status',
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
-        click_action: 'FLUTTER_NOTIFICATION_CLICK'
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+        notification_color: notificationColor,
+        is_open: isOpen.toString()
       },
       tokens: validTokens
     };
 
-    const response = await admin.messaging().sendEachForMulticast(message);
+    try {
+      const response = await admin.messaging().sendEachForMulticast(message);
 
-    console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
+      console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
+      console.log(`🎨 Color applied: ${isOpen ? 'GREEN (Open)' : 'RED (Closed)'}`);
 
-    // Cleanup invalid tokens
-    if (response.failureCount > 0) {
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const errorCode = resp.error?.code;
-          if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered' ||
-              errorCode === 'messaging/invalid-argument') {
-            const tokenToRemove = validTokens[idx];
-            const userIdToRemove = userIds[idx];
+      // Only remove tokens for specific critical errors
+      if (response.failureCount > 0) {
+        const tokensToRemove = [];
+        
+        response.responses.forEach((resp, idx) => {
+          if (!resp.success) {
+            const errorCode = resp.error?.code;
+            console.log(`❌ Token ${idx}: ${errorCode}`);
             
-            if (userIdToRemove) {
-              userTokens.delete(userIdToRemove);
-              db.collection('fcm_tokens').doc(userIdToRemove).delete();
-              console.log(`🗑️ Removed invalid token for user: ${userIdToRemove}`);
+            // Only remove for these specific errors
+            if (errorCode === 'messaging/invalid-registration-token' ||
+                errorCode === 'messaging/registration-token-not-registered') {
+              tokensToRemove.push({
+                token: validTokens[idx],
+                userId: userIds[idx]
+              });
             }
           }
+        });
+
+        // Remove invalid tokens
+        for (const { token, userId } of tokensToRemove) {
+          if (userId) {
+            userTokens.delete(userId);
+            await db.collection('fcm_tokens').doc(userId).delete();
+            console.log(`🗑️ Removed invalid token for user: ${userId}`);
+          }
         }
+      }
+
+      res.status(200).json({
+        success: true,
+        status: isOpen ? 'open' : 'closed',
+        successCount: response.successCount,
+        failureCount: response.failureCount,
+        totalUsers: validTokens.length,
+        notificationColor: notificationColor,
+        message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent`
+      });
+
+    } catch (sendError) {
+      console.error('❌ Send operation error:', sendError);
+      res.status(500).json({ 
+        error: 'Failed to send notifications',
+        details: sendError.message 
       });
     }
-
-    res.status(200).json({
-      success: true,
-      status: isOpen ? 'open' : 'closed',
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      totalUsers: validTokens.length,
-      message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent`
-    });
 
   } catch (error) {
     console.error('❌ Shop status error:', error);
@@ -423,7 +310,42 @@ app.post('/send-shop-status', async (req, res) => {
   }
 });
 
-// Test endpoint to check tokens
+// Simple send endpoint for testing
+app.post('/send-test-notification', async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ error: 'Token required' });
+    }
+
+    const message = {
+      notification: {
+        title: '🔧 Test Notification',
+        body: 'This is a test notification from the server! ✅'
+      },
+      token: token
+    };
+
+    const response = await admin.messaging().send(message);
+    
+    console.log('✅ Test notification sent successfully');
+    res.status(200).json({
+      success: true,
+      message: 'Test notification sent',
+      messageId: response
+    });
+
+  } catch (error) {
+    console.error('❌ Test notification error:', error);
+    res.status(500).json({ 
+      error: 'Failed to send test notification',
+      details: error.message 
+    });
+  }
+});
+
+// Debug endpoint to check all tokens
 app.get('/debug-tokens', async (req, res) => {
   try {
     const snapshot = await db.collection('fcm_tokens').get();
@@ -433,14 +355,16 @@ app.get('/debug-tokens', async (req, res) => {
       const data = doc.data();
       tokens.push({
         userId: data.userId,
-        token: data.token ? `${data.token.substring(0, 50)}...` : 'MISSING',
+        tokenPreview: data.token ? `${data.token.substring(0, 30)}...` : 'MISSING',
+        tokenLength: data.token ? data.token.length : 0,
         role: data.role,
-        isValid: data.token && typeof data.token === 'string' && data.token.length > 100
+        updatedAt: data.updatedAt
       });
     });
 
     res.status(200).json({
       totalTokens: snapshot.size,
+      uniqueUsers: userTokens.size,
       tokens: tokens
     });
   } catch (error) {
@@ -455,24 +379,21 @@ app.get('/', (req, res) => {
     status: 'Server running',
     uniqueUsers: userTokens.size,
     timestamp: new Date().toISOString(),
-    port: process.env.PORT,
     features: {
-      expandableNotifications: true,
-      enhancedMessages: true,
-      tokenValidation: true
+      coloredNotifications: true,
+      openColor: '#10B981',
+      closedColor: '#EF4444'
     }
   });
 });
 
-// Start server - Use Render's port
+// Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Notification service ready`);
-  console.log(`👥 Unique users: ${userTokens.size}`);
-  console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
+  console.log(`🎨 Colors: OPEN = Green (#10B981), CLOSED = Red (#EF4444)`);
   
-  // Sync tokens on startup
   syncTokens();
 });
 
@@ -497,17 +418,11 @@ async function syncTokens() {
     
     console.log(`✅ Synced ${userTokens.size} unique users from Firestore`);
     
-    // Validate all tokens
-    const allTokens = Array.from(userTokens.values()).map(u => u.token);
-    const validTokens = validateTokens(allTokens);
-    console.log(`🔍 Token validation: ${validTokens.length}/${allTokens.length} valid tokens`);
-    
   } catch (error) {
     console.error('❌ Sync error:', error);
   }
 }
 
-// Handle graceful shutdown
 process.on('SIGTERM', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
