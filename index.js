@@ -1,7 +1,6 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
-const cron = require('node-cron');
 
 const app = express();
 app.use(cors());
@@ -424,188 +423,6 @@ app.post('/send-shop-status', async (req, res) => {
   }
 });
 
-// Auto-close shop at 5PM Philippine Time
-async function autoCloseShop() {
-  try {
-    console.log('🕔 Auto-close: Checking shop status...');
-    
-    // Get current shop status
-    const shopDoc = await db.collection('shop_status').doc('current').get();
-    
-    if (shopDoc.exists && shopDoc.data().isOpen === true) {
-      console.log('🕔 Auto-close: Shop is open, closing now...');
-      
-      // Update Firestore status to closed
-      await db.collection('shop_status').doc('current').set({
-        'isOpen': false,
-        'updatedAt': admin.firestore.FieldValue.serverTimestamp(),
-        'updatedBy': 'auto_system',
-        'autoClosed': true,
-        'lastAutoClose': new Date().toISOString()
-      }, { merge: true });
-
-      // Get unique tokens from Firestore
-      const snapshot = await db.collection('fcm_tokens').get();
-      const uniqueTokens = [];
-      const userIds = [];
-
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.token && data.userId) {
-          uniqueTokens.push(data.token);
-          userIds.push(data.userId);
-        }
-      });
-
-      // Validate tokens
-      const validTokens = validateTokens(uniqueTokens);
-
-      if (validTokens.length > 0) {
-        // Send auto-close notification (same style as manual close)
-        const title = 'Shop is Now CLOSED';
-        const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
-
-        console.log(`📤 Auto-close: Sending notification to ${validTokens.length} users`);
-
-        const message = {
-          notification: { 
-            title, 
-            body
-          },
-          android: {
-            priority: 'high',
-            notification: {
-              channelId: 'shop_status_channel',
-              sound: 'default',
-              priority: 'max',
-              tag: 'shop_status',
-              clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-            }
-          },
-          apns: {
-            payload: {
-              aps: {
-                sound: 'default',
-                badge: 1
-              }
-            }
-          },
-          data: {
-            type: 'shop_status',
-            status: 'closed',
-            auto_closed: 'true',
-            timestamp: new Date().toISOString(),
-            click_action: 'FLUTTER_NOTIFICATION_CLICK'
-          },
-          tokens: validTokens
-        };
-
-        const response = await admin.messaging().sendEachForMulticast(message);
-        console.log(`✅ Auto-close: Notification sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
-        
-        // Log the auto-close event
-        await db.collection('auto_close_logs').add({
-          timestamp: new Date().toISOString(),
-          usersNotified: validTokens.length,
-          successCount: response.successCount,
-          failureCount: response.failureCount,
-          phTime: getPhilippineTime()
-        });
-        
-      } else {
-        console.log('⚠️ Auto-close: No valid users to notify');
-      }
-      
-      console.log('✅ Auto-close: Shop successfully closed at 5PM PH Time');
-    } else {
-      console.log('ℹ️ Auto-close: Shop is already closed, no action needed');
-    }
-  } catch (error) {
-    console.error('❌ Auto-close error:', error);
-    
-    // Log the error
-    await db.collection('auto_close_errors').add({
-      timestamp: new Date().toISOString(),
-      error: error.message,
-      phTime: getPhilippineTime()
-    });
-  }
-}
-
-// Get current Philippine time
-function getPhilippineTime() {
-  return new Date().toLocaleString('en-US', {
-    timeZone: 'Asia/Manila',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  });
-}
-
-// Schedule auto-close at 5PM Philippine Time every day
-function scheduleAutoClose() {
-  // Cron schedule for 5PM Philippine Time (17:00)
-  // Using 0 9 * * * for 5PM PH Time (UTC+8) = 9AM UTC
-  const task = cron.schedule('0 9 * * *', async () => {
-    console.log('⏰ Scheduled auto-close triggered at 5PM PH Time');
-    console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
-    console.log(`🕔 Current UTC Time: ${new Date().toISOString()}`);
-    
-    await autoCloseShop();
-  }, {
-    scheduled: true,
-    timezone: "Asia/Manila"
-  });
-
-  console.log('⏰ Auto-close scheduled: 5PM Philippine Time every day');
-  return task;
-}
-
-// Manual trigger for testing auto-close
-app.post('/trigger-auto-close', async (req, res) => {
-  try {
-    console.log('🔧 Manual auto-close trigger');
-    await autoCloseShop();
-    
-    res.status(200).json({
-      success: true,
-      message: 'Auto-close triggered manually',
-      phTime: getPhilippineTime()
-    });
-  } catch (error) {
-    console.error('❌ Manual trigger error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get auto-close logs
-app.get('/auto-close-logs', async (req, res) => {
-  try {
-    const snapshot = await db.collection('auto_close_logs')
-      .orderBy('timestamp', 'desc')
-      .limit(50)
-      .get();
-    
-    const logs = [];
-    snapshot.forEach(doc => {
-      logs.push({ id: doc.id, ...doc.data() });
-    });
-
-    res.status(200).json({
-      success: true,
-      logs: logs,
-      total: logs.length
-    });
-  } catch (error) {
-    console.error('❌ Logs error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Test endpoint to check tokens
 app.get('/debug-tokens', async (req, res) => {
   try {
@@ -632,20 +449,17 @@ app.get('/debug-tokens', async (req, res) => {
   }
 });
 
-// Health check with auto-close info
+// Health check
 app.get('/', (req, res) => {
   res.status(200).json({ 
     status: 'Server running',
     uniqueUsers: userTokens.size,
     timestamp: new Date().toISOString(),
-    philippineTime: getPhilippineTime(),
     port: process.env.PORT,
     features: {
       expandableNotifications: true,
       enhancedMessages: true,
-      tokenValidation: true,
-      autoClose: true,
-      autoCloseTime: '5:00 PM Philippine Time'
+      tokenValidation: true
     }
   });
 });
@@ -657,14 +471,9 @@ app.listen(PORT, () => {
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
   console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
-  console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily`);
-  console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
   
   // Sync tokens on startup
   syncTokens();
-  
-  // Start auto-close scheduler
-  scheduleAutoClose();
 });
 
 // Sync tokens from Firestore on startup
