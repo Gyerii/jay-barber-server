@@ -156,10 +156,10 @@ app.get('/token-count', async (req, res) => {
   }
 });
 
-// Send to unique users - EXPANDED NOTIFICATIONS
+// Send to unique users - NO DUPLICATES
 app.post('/send-to-unique-users', async (req, res) => {
   try {
-    const { title, body, tokens, userIds, type, status } = req.body;
+    const { title, body, tokens, userIds } = req.body;
 
     if (!title || !body) {
       return res.status(400).json({ error: 'Title and body required' });
@@ -197,19 +197,9 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} unique users...`);
 
-    // Prepare expanded message with additional data
+    // Prepare message
     const message = {
-      notification: { 
-        title, 
-        body: body.length > 100 ? `${body.substring(0, 100)}...` : body
-      },
-      data: {
-        type: type || 'shop_status',
-        status: status || 'update',
-        full_message: body,
-        timestamp: new Date().toISOString(),
-        click_action: 'FLUTTER_NOTIFICATION_CLICK'
-      },
+      notification: { title, body },
       android: {
         priority: 'high',
         notification: {
@@ -217,33 +207,15 @@ app.post('/send-to-unique-users', async (req, res) => {
           sound: 'default',
           priority: 'max',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          // Enable expanded notifications
-          style: 'bigText',
-          bigText: body,
-          summaryText: 'Tap to view full message'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1,
-            // iOS expanded notifications
-            alert: {
-              title: title,
-              body: body
-            }
+            badge: 1
           }
-        }
-      },
-      webpush: {
-        headers: {
-          Urgency: 'high'
-        },
-        notification: {
-          body: body,
-          requireInteraction: true
         }
       },
       tokens: uniqueTokens
@@ -288,85 +260,11 @@ app.post('/send-to-unique-users', async (req, res) => {
       success: true,
       successCount: response.successCount,
       failureCount: response.failureCount,
-      uniqueUsers: uniqueTokens.length,
-      message: `Sent to ${response.successCount} users`
+      uniqueUsers: uniqueTokens.length
     });
 
   } catch (error) {
     console.error('❌ Send error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Send custom notification with expanded options
-app.post('/send-custom-notification', async (req, res) => {
-  try {
-    const { title, body, imageUrl, actionButtons } = req.body;
-
-    if (!title || !body) {
-      return res.status(400).json({ error: 'Title and body required' });
-    }
-
-    // Get unique tokens from Firestore
-    const snapshot = await db.collection('fcm_tokens').get();
-    const uniqueTokens = [];
-
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      if (data.token && data.userId) {
-        uniqueTokens.push(data.token);
-      }
-    });
-
-    if (uniqueTokens.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: 'No registered users'
-      });
-    }
-
-    const message = {
-      notification: { 
-        title, 
-        body: body.length > 100 ? `${body.substring(0, 100)}...` : body
-      },
-      data: {
-        type: 'custom',
-        full_message: body,
-        timestamp: new Date().toISOString(),
-        has_image: imageUrl ? 'true' : 'false',
-        image_url: imageUrl || ''
-      },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'shop_status_channel',
-          sound: 'default',
-          priority: 'max',
-          tag: 'custom_notification',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          style: 'bigText',
-          bigText: body,
-          summaryText: 'Swipe to view more',
-          image: imageUrl
-        }
-      },
-      tokens: uniqueTokens
-    };
-
-    const response = await admin.messaging().sendEachForMulticast(message);
-
-    console.log(`✅ Custom notification sent to ${response.successCount} users`);
-
-    res.status(200).json({
-      success: true,
-      successCount: response.successCount,
-      failureCount: response.failureCount,
-      totalUsers: uniqueTokens.length
-    });
-
-  } catch (error) {
-    console.error('❌ Custom notification error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -435,8 +333,7 @@ app.get('/', (req, res) => {
   res.status(200).json({ 
     status: 'Server running',
     uniqueUsers: userTokens.size,
-    timestamp: new Date().toISOString(),
-    features: ['expanded_notifications', 'big_text_style', 'action_buttons']
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -446,7 +343,6 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
-  console.log(`✨ Features: Expanded notifications with view more functionality`);
   
   // Sync tokens on startup
   syncTokens();
