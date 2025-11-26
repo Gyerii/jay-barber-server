@@ -509,16 +509,38 @@ async function autoCloseShop() {
           usersNotified: validTokens.length,
           successCount: response.successCount,
           failureCount: response.failureCount,
-          phTime: getPhilippineTime()
+          phTime: getPhilippineTime(),
+          action: 'auto_closed'
         });
         
       } else {
         console.log('⚠️ Auto-close: No valid users to notify');
+        
+        // Log even if no users to notify
+        await db.collection('auto_close_logs').add({
+          timestamp: new Date().toISOString(),
+          usersNotified: 0,
+          successCount: 0,
+          failureCount: 0,
+          phTime: getPhilippineTime(),
+          action: 'auto_closed_no_users'
+        });
       }
       
       console.log('✅ Auto-close: Shop successfully closed at 5PM PH Time');
     } else {
       console.log('ℹ️ Auto-close: Shop is already closed, no action needed');
+      
+      // Log that shop was already closed
+      await db.collection('auto_close_logs').add({
+        timestamp: new Date().toISOString(),
+        usersNotified: 0,
+        successCount: 0,
+        failureCount: 0,
+        phTime: getPhilippineTime(),
+        action: 'already_closed',
+        message: 'Shop was already closed at 5PM'
+      });
     }
   } catch (error) {
     console.error('❌ Auto-close error:', error);
@@ -527,7 +549,8 @@ async function autoCloseShop() {
     await db.collection('auto_close_errors').add({
       timestamp: new Date().toISOString(),
       error: error.message,
-      phTime: getPhilippineTime()
+      phTime: getPhilippineTime(),
+      stack: error.stack
     });
   }
 }
@@ -606,6 +629,31 @@ app.get('/auto-close-logs', async (req, res) => {
   }
 });
 
+// Get current shop status
+app.get('/shop-status', async (req, res) => {
+  try {
+    const shopDoc = await db.collection('shop_status').doc('current').get();
+    
+    if (shopDoc.exists) {
+      res.status(200).json({
+        success: true,
+        isOpen: shopDoc.data().isOpen || false,
+        lastUpdated: shopDoc.data().updatedAt,
+        autoClosed: shopDoc.data().autoClosed || false
+      });
+    } else {
+      res.status(200).json({
+        success: true,
+        isOpen: false,
+        message: 'No shop status found'
+      });
+    }
+  } catch (error) {
+    console.error('❌ Shop status error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Test endpoint to check tokens
 app.get('/debug-tokens', async (req, res) => {
   try {
@@ -645,7 +693,8 @@ app.get('/', (req, res) => {
       enhancedMessages: true,
       tokenValidation: true,
       autoClose: true,
-      autoCloseTime: '5:00 PM Philippine Time'
+      autoCloseTime: '5:00 PM Philippine Time Daily',
+      description: 'Auto-close runs automatically even when app is closed'
     }
   });
 });
@@ -659,6 +708,7 @@ app.listen(PORT, () => {
   console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
   console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily`);
   console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
+  console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
   
   // Sync tokens on startup
   syncTokens();
