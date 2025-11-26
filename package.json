@@ -1,13 +1,13 @@
 {
   "name": "jay-barber-notification-server",
   "version": "1.0.0",
-  "description": "Push notification server for Jay The Barber app",
+  "description": "Push notification server for Jay The Barber app with auto-close feature",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
-  "keywords": ["firebase", "fcm", "notifications"],
+  "keywords": ["firebase", "fcm", "notifications", "auto-close"],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -16,7 +16,8 @@
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "protobufjs": "^7.2.5"
+    "protobufjs": "^7.2.5",
+    "node-cron": "^3.0.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
