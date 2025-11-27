@@ -189,7 +189,7 @@ function validateTokens(tokens) {
   return validTokens;
 }
 
-// Send to unique users - WITH EXPANDABLE NOTIFICATIONS
+// Send to unique users - WITH EXPANDABLE NOTIFICATIONS AND CUSTOM ICONS FOR BOTH PLATFORMS
 app.post('/send-to-unique-users', async (req, res) => {
   try {
     const { title, body, tokens, userIds } = req.body;
@@ -233,7 +233,7 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
 
-    // Prepare message with expandable notifications
+    // Prepare message with expandable notifications AND CUSTOM ICONS FOR BOTH PLATFORMS
     const message = {
       notification: { 
         title, 
@@ -246,16 +246,24 @@ app.post('/send-to-unique-users', async (req, res) => {
           sound: 'default',
           priority: 'max',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+          icon: 'logo', // CUSTOM ICON FOR ANDROID
+          color: '#956959' // Optional: Brand color for Android
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1
+            badge: 1,
+            // iOS uses the app icon automatically, but we can customize badge, sound, etc.
           }
         }
+      },
+      data: {
+        type: 'general_notification',
+        timestamp: new Date().toISOString(),
+        click_action: 'FLUTTER_NOTIFICATION_CLICK'
       },
       tokens: uniqueTokens
     };
@@ -309,7 +317,7 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// Enhanced notification with custom messages
+// Enhanced notification with custom messages AND CUSTOM ICONS FOR BOTH PLATFORMS
 app.post('/send-shop-status', async (req, res) => {
   try {
     const { isOpen } = req.body;
@@ -351,7 +359,7 @@ app.post('/send-shop-status', async (req, res) => {
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
-    // Enhanced message
+    // Enhanced message WITH CUSTOM ICONS FOR BOTH PLATFORMS
     const message = {
       notification: { 
         title, 
@@ -364,14 +372,18 @@ app.post('/send-shop-status', async (req, res) => {
           sound: 'default',
           priority: 'max',
           tag: 'shop_status',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+          icon: 'logo', // CUSTOM ICON FOR ANDROID
+          color: isOpen ? '#10B981' : '#EF4444' // Green for open, Red for closed
         }
       },
       apns: {
         payload: {
           aps: {
             sound: 'default',
-            badge: 1
+            badge: 1,
+            // iOS will use the app icon automatically
+            // You can add custom fields for iOS if needed
           }
         }
       },
@@ -379,7 +391,10 @@ app.post('/send-shop-status', async (req, res) => {
         type: 'shop_status',
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
-        click_action: 'FLUTTER_NOTIFICATION_CLICK'
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+        // Additional data that both platforms can use
+        icon: 'logo',
+        color: isOpen ? '#10B981' : '#EF4444'
       },
       tokens: validTokens
     };
@@ -445,7 +460,7 @@ function getCurrentPhilippineHour() {
   return phTime.getHours();
 }
 
-// Auto-close shop at 5PM Philippine Time
+// Auto-close shop at 5PM Philippine Time WITH CUSTOM ICONS FOR BOTH PLATFORMS
 async function autoCloseShop() {
   try {
     const currentHour = getCurrentPhilippineHour();
@@ -483,7 +498,7 @@ async function autoCloseShop() {
       const validTokens = validateTokens(uniqueTokens);
 
       if (validTokens.length > 0) {
-        // Send auto-close notification (same style as manual close)
+        // Send auto-close notification WITH CUSTOM ICONS FOR BOTH PLATFORMS
         const title = 'Shop is Now CLOSED';
         const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
@@ -501,14 +516,17 @@ async function autoCloseShop() {
               sound: 'default',
               priority: 'max',
               tag: 'shop_status',
-              clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+              clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+              icon: 'logo', // CUSTOM ICON FOR ANDROID
+              color: '#EF4444' // Red color for closed
             }
           },
           apns: {
             payload: {
               aps: {
                 sound: 'default',
-                badge: 1
+                badge: 1,
+                // iOS uses app icon automatically
               }
             }
           },
@@ -517,7 +535,9 @@ async function autoCloseShop() {
             status: 'closed',
             auto_closed: 'true',
             timestamp: new Date().toISOString(),
-            click_action: 'FLUTTER_NOTIFICATION_CLICK'
+            click_action: 'FLUTTER_NOTIFICATION_CLICK',
+            icon: 'logo',
+            color: '#EF4444'
           },
           tokens: validTokens
         };
@@ -727,6 +747,9 @@ app.get('/', (req, res) => {
       tokenValidation: true,
       autoClose: true,
       autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)',
+      customIcon: true,
+      iconPath: 'assets/icons/logo.png',
+      platforms: 'Android & iOS',
       description: 'Auto-close runs automatically even when app is closed'
     }
   });
@@ -739,6 +762,8 @@ app.listen(PORT, () => {
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
   console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
+  console.log(`🎨 Custom Icon: assets/icons/logo.png (Both Android & iOS)`);
+  console.log(`📱 Platform Support: Android (custom icon) & iOS (app icon)`);
   console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily (17:00 Asia/Manila)`);
   console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
   console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
