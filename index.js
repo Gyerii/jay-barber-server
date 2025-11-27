@@ -424,10 +424,32 @@ app.post('/send-shop-status', async (req, res) => {
   }
 });
 
+// Get current Philippine time
+function getPhilippineTime() {
+  return new Date().toLocaleString('en-US', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+}
+
+// Get current hour in Philippine Time
+function getCurrentPhilippineHour() {
+  const now = new Date();
+  const phTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+  return phTime.getHours();
+}
+
 // Auto-close shop at 5PM Philippine Time
 async function autoCloseShop() {
   try {
-    console.log('🕔 Auto-close: Checking shop status...');
+    const currentHour = getCurrentPhilippineHour();
+    console.log(`🕔 Auto-close: Checking shop status at ${getPhilippineTime()} (Hour: ${currentHour})...`);
     
     // Get current shop status
     const shopDoc = await db.collection('shop_status').doc('current').get();
@@ -510,6 +532,7 @@ async function autoCloseShop() {
           successCount: response.successCount,
           failureCount: response.failureCount,
           phTime: getPhilippineTime(),
+          phHour: currentHour,
           action: 'auto_closed'
         });
         
@@ -523,6 +546,7 @@ async function autoCloseShop() {
           successCount: 0,
           failureCount: 0,
           phTime: getPhilippineTime(),
+          phHour: currentHour,
           action: 'auto_closed_no_users'
         });
       }
@@ -538,6 +562,7 @@ async function autoCloseShop() {
         successCount: 0,
         failureCount: 0,
         phTime: getPhilippineTime(),
+        phHour: currentHour,
         action: 'already_closed',
         message: 'Shop was already closed at 5PM'
       });
@@ -555,28 +580,15 @@ async function autoCloseShop() {
   }
 }
 
-// Get current Philippine time
-function getPhilippineTime() {
-  return new Date().toLocaleString('en-US', {
-    timeZone: 'Asia/Manila',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  });
-}
-
 // Schedule auto-close at 5PM Philippine Time every day
 function scheduleAutoClose() {
-  // Cron schedule for 5PM Philippine Time (17:00)
-  // Using 0 9 * * * for 5PM PH Time (UTC+8) = 9AM UTC
-  const task = cron.schedule('0 9 * * *', async () => {
+  // FIXED: Cron schedule for 5PM Philippine Time (17:00)
+  // 5PM PH Time = 9AM UTC, but let's use the correct timezone
+  const task = cron.schedule('0 17 * * *', async () => {
     console.log('⏰ Scheduled auto-close triggered at 5PM PH Time');
     console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
     console.log(`🕔 Current UTC Time: ${new Date().toISOString()}`);
+    console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
     
     await autoCloseShop();
   }, {
@@ -584,7 +596,8 @@ function scheduleAutoClose() {
     timezone: "Asia/Manila"
   });
 
-  console.log('⏰ Auto-close scheduled: 5PM Philippine Time every day');
+  console.log('⏰ Auto-close scheduled: 5PM Philippine Time every day (17:00 Asia/Manila)');
+  console.log('⏰ This equals 9:00 AM UTC');
   return task;
 }
 
@@ -592,12 +605,14 @@ function scheduleAutoClose() {
 app.post('/trigger-auto-close', async (req, res) => {
   try {
     console.log('🔧 Manual auto-close trigger');
+    console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
     await autoCloseShop();
     
     res.status(200).json({
       success: true,
       message: 'Auto-close triggered manually',
-      phTime: getPhilippineTime()
+      phTime: getPhilippineTime(),
+      phHour: getCurrentPhilippineHour()
     });
   } catch (error) {
     console.error('❌ Manual trigger error:', error);
@@ -621,7 +636,12 @@ app.get('/auto-close-logs', async (req, res) => {
     res.status(200).json({
       success: true,
       logs: logs,
-      total: logs.length
+      total: logs.length,
+      currentTime: {
+        phTime: getPhilippineTime(),
+        phHour: getCurrentPhilippineHour(),
+        utcTime: new Date().toISOString()
+      }
     });
   } catch (error) {
     console.error('❌ Logs error:', error);
@@ -639,13 +659,21 @@ app.get('/shop-status', async (req, res) => {
         success: true,
         isOpen: shopDoc.data().isOpen || false,
         lastUpdated: shopDoc.data().updatedAt,
-        autoClosed: shopDoc.data().autoClosed || false
+        autoClosed: shopDoc.data().autoClosed || false,
+        currentTime: {
+          phTime: getPhilippineTime(),
+          phHour: getCurrentPhilippineHour()
+        }
       });
     } else {
       res.status(200).json({
         success: true,
         isOpen: false,
-        message: 'No shop status found'
+        message: 'No shop status found',
+        currentTime: {
+          phTime: getPhilippineTime(),
+          phHour: getCurrentPhilippineHour()
+        }
       });
     }
   } catch (error) {
@@ -672,7 +700,11 @@ app.get('/debug-tokens', async (req, res) => {
 
     res.status(200).json({
       totalTokens: snapshot.size,
-      tokens: tokens
+      tokens: tokens,
+      currentTime: {
+        phTime: getPhilippineTime(),
+        phHour: getCurrentPhilippineHour()
+      }
     });
   } catch (error) {
     console.error('❌ Debug error:', error);
@@ -687,13 +719,14 @@ app.get('/', (req, res) => {
     uniqueUsers: userTokens.size,
     timestamp: new Date().toISOString(),
     philippineTime: getPhilippineTime(),
+    philippineHour: getCurrentPhilippineHour(),
     port: process.env.PORT,
     features: {
       expandableNotifications: true,
       enhancedMessages: true,
       tokenValidation: true,
       autoClose: true,
-      autoCloseTime: '5:00 PM Philippine Time Daily',
+      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)',
       description: 'Auto-close runs automatically even when app is closed'
     }
   });
@@ -706,8 +739,9 @@ app.listen(PORT, () => {
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
   console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
-  console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily`);
+  console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily (17:00 Asia/Manila)`);
   console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
+  console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
   console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
   
   // Sync tokens on startup
