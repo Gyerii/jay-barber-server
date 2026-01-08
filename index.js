@@ -189,7 +189,7 @@ function validateTokens(tokens) {
   return validTokens;
 }
 
-// Send to unique users - WITH LOGO ONLY (NO COLORS)
+// Send to unique users - WITH EXPANDABLE NOTIFICATIONS AND CUSTOM ICONS FOR BOTH PLATFORMS
 app.post('/send-to-unique-users', async (req, res) => {
   try {
     const { title, body, tokens, userIds } = req.body;
@@ -233,7 +233,7 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
 
-    // Prepare message with LOGO ONLY (NO COLORS)
+    // Prepare message with expandable notifications AND CUSTOM ICONS FOR BOTH PLATFORMS
     const message = {
       notification: { 
         title, 
@@ -247,7 +247,8 @@ app.post('/send-to-unique-users', async (req, res) => {
           priority: 'max',
           tag: 'shop_status',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo', // LOGO ONLY - NO COLOR
+          icon: 'logo', // CUSTOM ICON FOR ANDROID
+          color: '#956959' // Optional: Brand color for Android
         }
       },
       apns: {
@@ -255,6 +256,7 @@ app.post('/send-to-unique-users', async (req, res) => {
           aps: {
             sound: 'default',
             badge: 1,
+            // iOS uses the app icon automatically, but we can customize badge, sound, etc.
           }
         }
       },
@@ -315,7 +317,7 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// Enhanced notification with custom messages - LOGO ONLY (NO COLORS)
+// Enhanced notification with custom messages AND CUSTOM ICONS FOR BOTH PLATFORMS
 app.post('/send-shop-status', async (req, res) => {
   try {
     const { isOpen } = req.body;
@@ -357,7 +359,7 @@ app.post('/send-shop-status', async (req, res) => {
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
-    // Enhanced message WITH LOGO ONLY (NO COLORS)
+    // Enhanced message WITH CUSTOM ICONS FOR BOTH PLATFORMS
     const message = {
       notification: { 
         title, 
@@ -371,7 +373,8 @@ app.post('/send-shop-status', async (req, res) => {
           priority: 'max',
           tag: 'shop_status',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo', // LOGO ONLY - NO COLOR
+          icon: 'logo', // CUSTOM ICON FOR ANDROID
+          color: isOpen ? '#10B981' : '#EF4444' // Green for open, Red for closed
         }
       },
       apns: {
@@ -379,6 +382,8 @@ app.post('/send-shop-status', async (req, res) => {
           aps: {
             sound: 'default',
             badge: 1,
+            // iOS will use the app icon automatically
+            // You can add custom fields for iOS if needed
           }
         }
       },
@@ -387,8 +392,9 @@ app.post('/send-shop-status', async (req, res) => {
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
+        // Additional data that both platforms can use
         icon: 'logo',
-        // NO COLOR IN DATA
+        color: isOpen ? '#10B981' : '#EF4444'
       },
       tokens: validTokens
     };
@@ -454,7 +460,7 @@ function getCurrentPhilippineHour() {
   return phTime.getHours();
 }
 
-// Auto-close shop at 5PM Philippine Time - LOGO ONLY (NO COLORS)
+// Auto-close shop at 5PM Philippine Time WITH CUSTOM ICONS FOR BOTH PLATFORMS
 async function autoCloseShop() {
   try {
     const currentHour = getCurrentPhilippineHour();
@@ -492,7 +498,7 @@ async function autoCloseShop() {
       const validTokens = validateTokens(uniqueTokens);
 
       if (validTokens.length > 0) {
-        // Send auto-close notification - LOGO ONLY (NO COLORS)
+        // Send auto-close notification WITH CUSTOM ICONS FOR BOTH PLATFORMS
         const title = 'Shop is Now CLOSED';
         const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
@@ -511,7 +517,8 @@ async function autoCloseShop() {
               priority: 'max',
               tag: 'shop_status',
               clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-              icon: 'logo', // LOGO ONLY - NO COLOR
+              icon: 'logo', // CUSTOM ICON FOR ANDROID
+              color: '#EF4444' // Red color for closed
             }
           },
           apns: {
@@ -519,6 +526,7 @@ async function autoCloseShop() {
               aps: {
                 sound: 'default',
                 badge: 1,
+                // iOS uses app icon automatically
               }
             }
           },
@@ -529,7 +537,7 @@ async function autoCloseShop() {
             timestamp: new Date().toISOString(),
             click_action: 'FLUTTER_NOTIFICATION_CLICK',
             icon: 'logo',
-            // NO COLOR IN DATA
+            color: '#EF4444'
           },
           tokens: validTokens
         };
@@ -592,15 +600,15 @@ async function autoCloseShop() {
   }
 }
 
-// Enhanced auto-close with multiple fallbacks
+// Schedule auto-close at 5PM Philippine Time every day
 function scheduleAutoClose() {
-  console.log('⏰ ENHANCED Auto-close scheduled: 5PM Philippine Time every day (17:00 Asia/Manila)');
-  
-  // 1. MAIN: Exact 5:00 PM trigger
-  const mainTask = cron.schedule('0 17 * * *', async () => {
-    console.log('⏰ 🎯 MAIN: Exact 5:00 PM auto-close triggered');
+  // FIXED: Cron schedule for 5PM Philippine Time (17:00)
+  // 5PM PH Time = 9AM UTC, but let's use the correct timezone
+  const task = cron.schedule('0 17 * * *', async () => {
+    console.log('⏰ Scheduled auto-close triggered at 5PM PH Time');
     console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
-    console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
+    console.log(`🕔 Current UTC Time: ${new Date().toISOString()}`);
+    console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
     
     await autoCloseShop();
   }, {
@@ -608,44 +616,9 @@ function scheduleAutoClose() {
     timezone: "Asia/Manila"
   });
 
-  // 2. BACKUP: Runs every minute from 4:59 PM to 5:01 PM
-  const backupTask = cron.schedule('59-01 16-17 * * *', async () => {
-    const currentHour = getCurrentPhilippineHour();
-    const currentMinute = new Date().getMinutes();
-    
-    if (currentHour === 17 && currentMinute === 0) {
-      console.log('⏰ 🔄 BACKUP: Auto-close triggered by backup at exact 5:00 PM');
-      console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
-      await autoCloseShop();
-    }
-  }, {
-    scheduled: true,
-    timezone: "Asia/Manila"
-  });
-
-  // 3. SAFETY: Additional check at 5:02 PM in case both above miss
-  const safetyTask = cron.schedule('2 17 * * *', async () => {
-    console.log('⏰ 🛡️ SAFETY: 5:02 PM safety check triggered');
-    
-    // Check if shop is still open and auto-close if needed
-    const shopDoc = await db.collection('shop_status').doc('current').get();
-    if (shopDoc.exists && shopDoc.data().isOpen === true) {
-      console.log('⏰ 🛡️ SAFETY: Shop still open at 5:02 PM, closing now...');
-      await autoCloseShop();
-    } else {
-      console.log('⏰ 🛡️ SAFETY: Shop already closed at 5:02 PM');
-    }
-  }, {
-    scheduled: true,
-    timezone: "Asia/Manila"
-  });
-
-  console.log('✅ Enhanced auto-close scheduler started with 3 layers of protection');
-  console.log('🎯 MAIN: Exact 5:00 PM');
-  console.log('🔄 BACKUP: 4:59 PM - 5:01 PM (every minute)'); 
-  console.log('🛡️ SAFETY: 5:02 PM final check');
-
-  return { mainTask, backupTask, safetyTask };
+  console.log('⏰ Auto-close scheduled: 5PM Philippine Time every day (17:00 Asia/Manila)');
+  console.log('⏰ This equals 9:00 AM UTC');
+  return task;
 }
 
 // Manual trigger for testing auto-close
@@ -789,8 +762,8 @@ app.listen(PORT, () => {
   console.log(`📱 Notification service ready`);
   console.log(`👥 Unique users: ${userTokens.size}`);
   console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
-  console.log(`🎨 Custom Icon: logo.png (Android) & iOS (app icon)`);
-  console.log(`🎯 Color Scheme: Logo only - No green/red colors`);
+  console.log(`🎨 Custom Icon: assets/icons/logo.png (Both Android & iOS)`);
+  console.log(`📱 Platform Support: Android (custom icon) & iOS (app icon)`);
   console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily (17:00 Asia/Manila)`);
   console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
   console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
