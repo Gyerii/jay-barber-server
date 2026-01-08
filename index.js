@@ -54,7 +54,7 @@ app.post('/store-token', async (req, res) => {
       });
     }
 
-    // Validate token format
+    // Validate token format (length only – no startsWith check)
     if (typeof token !== 'string' || token.length < 100) {
       return res.status(400).json({
         error: 'Invalid token format'
@@ -80,7 +80,7 @@ app.post('/store-token', async (req, res) => {
     }, { merge: true });
 
     console.log(`✅ Token stored for: ${userId} (${role || 'user'})`);
-    console.log(`📊 Total unique users: ${userTokens.size}`);
+    console.log(`📊 Total unique users (memory): ${userTokens.size}`);
 
     res.status(200).json({ 
       success: true,
@@ -115,7 +115,7 @@ app.post('/remove-token', async (req, res) => {
       }
     }
 
-    console.log(`📊 Remaining users: ${userTokens.size}`);
+    console.log(`📊 Remaining users (memory): ${userTokens.size}`);
 
     res.status(200).json({ 
       success: true,
@@ -150,7 +150,7 @@ app.get('/token-count', async (req, res) => {
 
     const uniqueUsers = userTokens.size;
 
-    console.log(`📊 Unique users: ${uniqueUsers}`);
+    console.log(`📊 Unique users (Firestore): ${uniqueUsers}`);
 
     res.status(200).json({ 
       activeTokens: uniqueUsers,
@@ -170,9 +170,8 @@ function validateTokens(tokens) {
   const invalidTokens = [];
   
   tokens.forEach(token => {
-    if (typeof token === 'string' && 
-        token.length > 100 && 
-        token.startsWith('f')) {
+    if (typeof token === 'string' && token.length > 100) {
+      // ✅ Consider as valid FCM token
       validTokens.push(token);
     } else {
       invalidTokens.push(token);
@@ -182,14 +181,15 @@ function validateTokens(tokens) {
   if (invalidTokens.length > 0) {
     console.log(`⚠️ Invalid tokens found: ${invalidTokens.length}`);
     invalidTokens.forEach(token => {
-      console.log(`❌ Invalid token: ${token?.substring(0, 50)}...`);
+      console.log(`❌ Invalid token: ${token ? token.substring(0, 50) + '...' : token}`);
     });
   }
-  
+
+  console.log(`🔍 validateTokens: ${validTokens.length}/${tokens.length} valid`);
   return validTokens;
 }
 
-// Send to unique users - WITH EXPANDABLE NOTIFICATIONS AND CUSTOM ICONS FOR BOTH PLATFORMS
+// Send to unique users - WITH LOGO ONLY (NO COLORS)
 app.post('/send-to-unique-users', async (req, res) => {
   try {
     const { title, body, tokens, userIds } = req.body;
@@ -233,7 +233,7 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
 
-    // Prepare message with expandable notifications AND CUSTOM ICONS FOR BOTH PLATFORMS
+    // Prepare message with LOGO ONLY (NO COLORS)
     const message = {
       notification: { 
         title, 
@@ -247,8 +247,7 @@ app.post('/send-to-unique-users', async (req, res) => {
           priority: 'max',
           tag: 'shop_status',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo', // CUSTOM ICON FOR ANDROID
-          color: '#956959' // Optional: Brand color for Android
+          icon: 'logo', // LOGO ONLY - NO COLOR
         }
       },
       apns: {
@@ -256,7 +255,6 @@ app.post('/send-to-unique-users', async (req, res) => {
           aps: {
             sound: 'default',
             badge: 1,
-            // iOS uses the app icon automatically, but we can customize badge, sound, etc.
           }
         }
       },
@@ -283,9 +281,11 @@ app.post('/send-to-unique-users', async (req, res) => {
           const errorCode = resp.error?.code;
           console.log(`❌ Token ${idx}: ${errorCode}`);
           
-          if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered' ||
-              errorCode === 'messaging/invalid-argument') {
+          if (
+            errorCode === 'messaging/invalid-registration-token' ||
+            errorCode === 'messaging/registration-token-not-registered' ||
+            errorCode === 'messaging/invalid-argument'
+          ) {
             tokensToRemove.push(uniqueTokens[idx]);
           }
         }
@@ -317,7 +317,7 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// Enhanced notification with custom messages AND CUSTOM ICONS FOR BOTH PLATFORMS
+// Enhanced notification with custom messages - LOGO ONLY (NO COLORS)
 app.post('/send-shop-status', async (req, res) => {
   try {
     const { isOpen } = req.body;
@@ -359,7 +359,7 @@ app.post('/send-shop-status', async (req, res) => {
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
-    // Enhanced message WITH CUSTOM ICONS FOR BOTH PLATFORMS
+    // Enhanced message WITH LOGO ONLY (NO COLORS)
     const message = {
       notification: { 
         title, 
@@ -373,8 +373,7 @@ app.post('/send-shop-status', async (req, res) => {
           priority: 'max',
           tag: 'shop_status',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo', // CUSTOM ICON FOR ANDROID
-          color: isOpen ? '#10B981' : '#EF4444' // Green for open, Red for closed
+          icon: 'logo', // LOGO ONLY - NO COLOR
         }
       },
       apns: {
@@ -382,8 +381,6 @@ app.post('/send-shop-status', async (req, res) => {
           aps: {
             sound: 'default',
             badge: 1,
-            // iOS will use the app icon automatically
-            // You can add custom fields for iOS if needed
           }
         }
       },
@@ -392,9 +389,8 @@ app.post('/send-shop-status', async (req, res) => {
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
-        // Additional data that both platforms can use
         icon: 'logo',
-        color: isOpen ? '#10B981' : '#EF4444'
+        // NO COLOR IN DATA
       },
       tokens: validTokens
     };
@@ -408,9 +404,11 @@ app.post('/send-shop-status', async (req, res) => {
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
           const errorCode = resp.error?.code;
-          if (errorCode === 'messaging/invalid-registration-token' ||
-              errorCode === 'messaging/registration-token-not-registered' ||
-              errorCode === 'messaging/invalid-argument') {
+          if (
+            errorCode === 'messaging/invalid-registration-token' ||
+            errorCode === 'messaging/registration-token-not-registered' ||
+            errorCode === 'messaging/invalid-argument'
+          ) {
             const tokenToRemove = validTokens[idx];
             const userIdToRemove = userIds[idx];
             
@@ -460,7 +458,7 @@ function getCurrentPhilippineHour() {
   return phTime.getHours();
 }
 
-// Auto-close shop at 5PM Philippine Time WITH CUSTOM ICONS FOR BOTH PLATFORMS
+// Auto-close shop at 5PM Philippine Time - LOGO ONLY (NO COLORS)
 async function autoCloseShop() {
   try {
     const currentHour = getCurrentPhilippineHour();
@@ -474,11 +472,11 @@ async function autoCloseShop() {
       
       // Update Firestore status to closed
       await db.collection('shop_status').doc('current').set({
-        'isOpen': false,
-        'updatedAt': admin.firestore.FieldValue.serverTimestamp(),
-        'updatedBy': 'auto_system',
-        'autoClosed': true,
-        'lastAutoClose': new Date().toISOString()
+        isOpen: false,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedBy: 'auto_system',
+        autoClosed: true,
+        lastAutoClose: new Date().toISOString()
       }, { merge: true });
 
       // Get unique tokens from Firestore
@@ -498,7 +496,7 @@ async function autoCloseShop() {
       const validTokens = validateTokens(uniqueTokens);
 
       if (validTokens.length > 0) {
-        // Send auto-close notification WITH CUSTOM ICONS FOR BOTH PLATFORMS
+        // Send auto-close notification - LOGO ONLY (NO COLORS)
         const title = 'Shop is Now CLOSED';
         const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
@@ -517,8 +515,7 @@ async function autoCloseShop() {
               priority: 'max',
               tag: 'shop_status',
               clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-              icon: 'logo', // CUSTOM ICON FOR ANDROID
-              color: '#EF4444' // Red color for closed
+              icon: 'logo', // LOGO ONLY - NO COLOR
             }
           },
           apns: {
@@ -526,7 +523,6 @@ async function autoCloseShop() {
               aps: {
                 sound: 'default',
                 badge: 1,
-                // iOS uses app icon automatically
               }
             }
           },
@@ -537,7 +533,7 @@ async function autoCloseShop() {
             timestamp: new Date().toISOString(),
             click_action: 'FLUTTER_NOTIFICATION_CLICK',
             icon: 'logo',
-            color: '#EF4444'
+            // NO COLOR IN DATA
           },
           tokens: validTokens
         };
@@ -600,25 +596,60 @@ async function autoCloseShop() {
   }
 }
 
-// Schedule auto-close at 5PM Philippine Time every day
+// Enhanced auto-close with multiple fallbacks
 function scheduleAutoClose() {
-  // FIXED: Cron schedule for 5PM Philippine Time (17:00)
-  // 5PM PH Time = 9AM UTC, but let's use the correct timezone
-  const task = cron.schedule('0 17 * * *', async () => {
-    console.log('⏰ Scheduled auto-close triggered at 5PM PH Time');
+  console.log('⏰ ENHANCED Auto-close scheduled: 5PM Philippine Time every day (17:00 Asia/Manila)');
+  
+  // 1. MAIN: Exact 5:00 PM trigger
+  const mainTask = cron.schedule('0 17 * * *', async () => {
+    console.log('⏰ 🎯 MAIN: Exact 5:00 PM auto-close triggered');
     console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
-    console.log(`🕔 Current UTC Time: ${new Date().toISOString()}`);
-    console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
+    console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
     
     await autoCloseShop();
   }, {
     scheduled: true,
-    timezone: "Asia/Manila"
+    timezone: 'Asia/Manila'
   });
 
-  console.log('⏰ Auto-close scheduled: 5PM Philippine Time every day (17:00 Asia/Manila)');
-  console.log('⏰ This equals 9:00 AM UTC');
-  return task;
+  // 2. BACKUP: Runs every minute from 4:59 PM to 5:01 PM
+  const backupTask = cron.schedule('59-01 16-17 * * *', async () => {
+    const currentHour = getCurrentPhilippineHour();
+    const currentMinute = new Date().getMinutes();
+    
+    if (currentHour === 17 && currentMinute === 0) {
+      console.log('⏰ 🔄 BACKUP: Auto-close triggered by backup at exact 5:00 PM');
+      console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
+      await autoCloseShop();
+    }
+  }, {
+    scheduled: true,
+    timezone: 'Asia/Manila'
+  });
+
+  // 3. SAFETY: Additional check at 5:02 PM in case both above miss
+  const safetyTask = cron.schedule('2 17 * * *', async () => {
+    console.log('⏰ 🛡️ SAFETY: 5:02 PM safety check triggered');
+    
+    // Check if shop is still open and auto-close if needed
+    const shopDoc = await db.collection('shop_status').doc('current').get();
+    if (shopDoc.exists && shopDoc.data().isOpen === true) {
+      console.log('⏰ 🛡️ SAFETY: Shop still open at 5:02 PM, closing now...');
+      await autoCloseShop();
+    } else {
+      console.log('⏰ 🛡️ SAFETY: Shop already closed at 5:02 PM');
+    }
+  }, {
+    scheduled: true,
+    timezone: 'Asia/Manila'
+  });
+
+  console.log('✅ Enhanced auto-close scheduler started with 3 layers of protection');
+  console.log('🎯 MAIN: Exact 5:00 PM');
+  console.log('🔄 BACKUP: 4:59 PM - 5:01 PM (every minute)'); 
+  console.log('🛡️ SAFETY: 5:02 PM final check');
+
+  return { mainTask, backupTask, safetyTask };
 }
 
 // Manual trigger for testing auto-close
@@ -759,15 +790,15 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Notification service ready`);
-  console.log(`👥 Unique users: ${userTokens.size}`);
-  console.log(`✨ Features: Expandable Notifications, Enhanced Messages, Token Validation`);
-  console.log(`🎨 Custom Icon: assets/icons/logo.png (Both Android & iOS)`);
-  console.log(`📱 Platform Support: Android (custom icon) & iOS (app icon)`);
-  console.log(`⏰ Auto-close: Scheduled for 5PM Philippine Time daily (17:00 Asia/Manila)`);
+  console.log('📱 Notification service ready');
+  console.log(`👥 Unique users (memory): ${userTokens.size}`);
+  console.log('✨ Features: Expandable Notifications, Enhanced Messages, Token Validation');
+  console.log('🎨 Custom Icon: logo.png (Android) & iOS (app icon)');
+  console.log('🎯 Color Scheme: Logo only - No green/red colors');
+  console.log('⏰ Auto-close: Scheduled for 5PM Philippine Time daily (17:00 Asia/Manila)');
   console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
   console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
-  console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
+  console.log('🌍 Timezone: Asia/Manila (UTC+8)');
   
   // Sync tokens on startup
   syncTokens();
