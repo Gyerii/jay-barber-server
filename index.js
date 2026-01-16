@@ -93,6 +93,48 @@ function getCurrentPhilippineHour() {
   return phTime.getHours();
 }
 
+// ✅ Get role of user by uid from /users/{uid}
+async function getUserRoleById(userId) {
+  try {
+    if (!userId) return 'user';
+    const doc = await db.collection('users').doc(userId).get();
+    if (!doc.exists) return 'user';
+    return (doc.data()?.role || 'user').toString();
+  } catch (e) {
+    console.log('⚠️ getUserRoleById failed:', e.message);
+    return 'user';
+  }
+}
+
+// ✅ Role-based filtering rule:
+// - always skip senderId
+// - if senderRole is admin => skip all admin recipients
+// - if senderRole is super_admin => skip all super_admin recipients
+function shouldSkipRecipient({ senderId, senderRole, recipientUserId, recipientRole }) {
+  if (!recipientUserId) return true;
+
+  // Always skip sender
+  if (senderId && recipientUserId === senderId) return true;
+
+  // Role-group suppression for staff:
+  if (senderRole === 'admin' && recipientRole === 'admin') return true;
+  if (senderRole === 'super_admin' && recipientRole === 'super_admin') return true;
+
+  return false;
+}
+
+// ✅ Cleanup invalid tokens by token string
+async function cleanupInvalidTokensByList(tokensList) {
+  for (const token of tokensList) {
+    const badDocs = await db.collection('fcm_tokens').where('token', '==', token).get();
+    for (const d of badDocs.docs) {
+      userTokens.delete(d.id);
+      await db.collection('fcm_tokens').doc(d.id).delete();
+      console.log(`🗑️ Cleaned invalid token doc: ${d.id}`);
+    }
+  }
+}
+
 // =========================
 // ✅ TOKEN STORE - ONE per user
 // =========================
@@ -287,12 +329,10 @@ app.post('/send-to-unique-users', async (req, res) => {
     // Remove invalid tokens
     if (response.failureCount > 0) {
       const tokensToRemove = [];
-
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
           const errorCode = resp.error?.code;
           console.log(`❌ Token ${idx}: ${errorCode}`);
-
           if (
             errorCode === 'messaging/invalid-registration-token' ||
             errorCode === 'messaging/registration-token-not-registered' ||
@@ -302,15 +342,7 @@ app.post('/send-to-unique-users', async (req, res) => {
           }
         }
       });
-
-      for (const token of tokensToRemove) {
-        const badDocs = await db.collection('fcm_tokens').where('token', '==', token).get();
-        for (const d of badDocs.docs) {
-          userTokens.delete(d.id);
-          await db.collection('fcm_tokens').doc(d.id).delete();
-          console.log(`🗑️ Cleaned invalid token doc: ${d.id}`);
-        }
-      }
+      await cleanupInvalidTokensByList(tokensToRemove);
     }
 
     res.status(200).json({
@@ -396,6 +428,7 @@ app.post('/send-shop-status', async (req, res) => {
     console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
 
     if (response.failureCount > 0) {
+      const badTokens = [];
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
           const errorCode = resp.error?.code;
@@ -404,6 +437,7 @@ app.post('/send-shop-status', async (req, res) => {
             errorCode === 'messaging/registration-token-not-registered' ||
             errorCode === 'messaging/invalid-argument'
           ) {
+            badTokens.push(validTokens[idx]);
             const userIdToRemove = userIds[idx];
             if (userIdToRemove) {
               userTokens.delete(userIdToRemove);
@@ -413,6 +447,10 @@ app.post('/send-shop-status', async (req, res) => {
           }
         }
       });
+
+      if (badTokens.length > 0) {
+        await cleanupInvalidTokensByList(badTokens);
+      }
     }
 
     res.status(200).json({
@@ -431,25 +469,36 @@ app.post('/send-shop-status', async (req, res) => {
 });
 
 // =========================
-// ✅ NEW FEATURE: GROUP CHAT NOTIFICATION TO ALL USERS
-// - Watches 'group_chat' Firestore
-// - Sends notif when new message added
-// - Prevent duplicates using "notified: true"
+// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED)
 // =========================
-async function sendGroupChatNotificationToAll({ senderId, senderName, messageType, message }) {
-  const snap = await db.collection('fcm_tokens').get();
+async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, messageType, message }) {
+  const senderRole = await getUserRoleById(senderId);
 
+  const snap = await db.collection('fcm_tokens').get();
   const tokens = [];
+
   snap.forEach(doc => {
-    const data = doc.data();
-    if (!data?.token || !data?.userId) return;
-    if (data.userId === senderId) return; // ✅ don't notify sender
-    tokens.push(data.token);
+    const data = doc.data() || {};
+    const recipientUserId = (data.userId || doc.id || '').toString();
+    const recipientRole = (data.role || 'user').toString();
+    const token = data.token;
+
+    if (!token || typeof token !== 'string') return;
+
+    // ✅ Apply your requested filtering rule
+    if (shouldSkipRecipient({
+      senderId,
+      senderRole,
+      recipientUserId,
+      recipientRole
+    })) return;
+
+    tokens.push(token);
   });
 
   const validTokens = validateTokens(tokens);
   if (validTokens.length === 0) {
-    console.log('⚠️ No valid users to notify for group chat');
+    console.log('⚠️ No valid recipients after role filtering (group chat).');
     return { successCount: 0, failureCount: 0 };
   }
 
@@ -482,9 +531,10 @@ async function sendGroupChatNotificationToAll({ senderId, senderName, messageTyp
       apns: { payload: { aps: { sound: 'default' } } },
       data: {
         type: 'group_chat',
-        senderId: senderId || '',
-        senderName: senderName || '',
-        messageType: messageType || 'text',
+        senderId: (senderId || '').toString(),
+        senderName: (senderName || '').toString(),
+        senderRole: senderRole, // ✅ VERY IMPORTANT for Flutter safety filter
+        messageType: (messageType || 'text').toString(),
         message: (message || '').toString(),
         timestamp: new Date().toISOString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK'
@@ -496,8 +546,9 @@ async function sendGroupChatNotificationToAll({ senderId, senderName, messageTyp
     totalSuccess += resp.successCount;
     totalFailure += resp.failureCount;
 
-    // cleanup invalid tokens
+    // Cleanup invalid tokens
     if (resp.failureCount > 0) {
+      const toRemove = [];
       for (let i = 0; i < resp.responses.length; i++) {
         const r = resp.responses[i];
         if (!r.success) {
@@ -507,20 +558,15 @@ async function sendGroupChatNotificationToAll({ senderId, senderName, messageTyp
             code === 'messaging/registration-token-not-registered' ||
             code === 'messaging/invalid-argument'
           ) {
-            const badToken = chunk[i];
-            const badDocs = await db.collection('fcm_tokens').where('token', '==', badToken).get();
-            for (const d of badDocs.docs) {
-              userTokens.delete(d.id);
-              await db.collection('fcm_tokens').doc(d.id).delete();
-              console.log(`🗑️ Removed invalid token doc: ${d.id}`);
-            }
+            toRemove.push(chunk[i]);
           }
         }
       }
+      if (toRemove.length > 0) await cleanupInvalidTokensByList(toRemove);
     }
   }
 
-  console.log(`✅ Group chat notif done. Success=${totalSuccess}, Failed=${totalFailure}`);
+  console.log(`✅ Group chat role-filter notif done. Success=${totalSuccess}, Failed=${totalFailure}`);
   return { successCount: totalSuccess, failureCount: totalFailure };
 }
 
@@ -566,7 +612,8 @@ function listenGroupChatNotifications() {
             notifiedByInstance: process.env.INSTANCE_ID || 'render'
           }, { merge: true });
 
-          await sendGroupChatNotificationToAll({
+          // ✅ use ROLE FILTERED sender logic now
+          await sendGroupChatNotificationRoleFiltered({
             senderId: (data.senderId || '').toString(),
             senderName: (data.senderName || 'Someone').toString(),
             messageType,
@@ -847,7 +894,8 @@ app.get('/', (req, res) => {
       groupChatNotifications: true,
       tokenValidation: true,
       autoClose: true,
-      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
+      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)',
+      roleBasedGroupChatFiltering: true
     }
   });
 });
