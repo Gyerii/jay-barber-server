@@ -106,6 +106,33 @@ async function getUserRoleById(userId) {
   }
 }
 
+// ✅ NEW: Get display name of user by uid from /users/{uid}
+async function getUserDisplayNameById(userId) {
+  try {
+    if (!userId) return 'Unknown user';
+    const doc = await db.collection('users').doc(userId).get();
+    if (!doc.exists) return 'Unknown user';
+
+    const d = doc.data() || {};
+    // Try common field names safely:
+    const fullName = (d.fullName || d.name || d.displayName || '').toString().trim();
+    if (fullName) return fullName;
+
+    const first = (d.firstName || '').toString().trim();
+    const last = (d.lastName || '').toString().trim();
+    const combined = `${first} ${last}`.trim();
+    if (combined) return combined;
+
+    const phone = (d.phone || d.phoneNumber || '').toString().trim();
+    if (phone) return phone;
+
+    return 'Unknown user';
+  } catch (e) {
+    console.log('⚠️ getUserDisplayNameById failed:', e.message);
+    return 'Unknown user';
+  }
+}
+
 // ✅ Role-based filtering rule (YOUR REQUEST):
 // - always skip senderId
 // - if senderRole is admin => skip all admin recipients
@@ -163,7 +190,7 @@ async function claimNotificationLock(docRef) {
 }
 
 // =========================
-// ✅ NEW: BOOKING STATUS NOTIFICATION LOCK (no duplicates across instances)
+// ✅ BOOKING STATUS NOTIFICATION LOCK (no duplicates across instances)
 // =========================
 async function claimBookingStatusLock(bookingRef, status) {
   try {
@@ -195,7 +222,35 @@ async function claimBookingStatusLock(bookingRef, status) {
 }
 
 // =========================
-// ✅ NEW: Send BOOKING notification ONLY to booking owner
+// ✅ NEW: BOOKING REQUEST NOTIFICATION LOCK (notify admin once)
+// =========================
+async function claimBookingRequestLock(bookingRef) {
+  try {
+    const claimed = await db.runTransaction(async (t) => {
+      const snap = await t.get(bookingRef);
+      if (!snap.exists) return false;
+
+      const data = snap.data() || {};
+      if (data.adminNotifiedNewBooking === true) return false;
+
+      t.set(bookingRef, {
+        adminNotifiedNewBooking: true,
+        adminNotifiedNewBookingAt: admin.firestore.FieldValue.serverTimestamp(),
+        adminNotifiedNewBookingByInstance: process.env.INSTANCE_ID || process.env.RENDER_INSTANCE_ID || 'render'
+      }, { merge: true });
+
+      return true;
+    });
+
+    return claimed === true;
+  } catch (e) {
+    console.error('❌ claimBookingRequestLock error:', e);
+    return false;
+  }
+}
+
+// =========================
+// ✅ Send BOOKING notification ONLY to booking owner
 // =========================
 async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData }) {
   try {
@@ -223,7 +278,6 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
     let title = 'Booking Update';
     let body = `${haircutName} status updated: ${status}`;
 
-    // ✅ Make message nicer
     if (status === 'approved' || status === 'confirmed') {
       title = 'Booking Approved';
       body = slot ? `Your booking is approved for ${slot}.` : 'Your booking is approved.';
@@ -250,16 +304,11 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
           sound: 'default',
           priority: 'max',
           icon: 'logo',
-          // ✅ tag makes Android replace duplicates
           tag: `booking_${bookingId}_${status}`,
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
         }
       },
-      apns: {
-        payload: {
-          aps: { sound: 'default' }
-        }
-      },
+      apns: { payload: { aps: { sound: 'default' } } },
       data: {
         type: 'booking_status',
         bookingId: bookingId.toString(),
@@ -279,12 +328,122 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
 }
 
 // =========================
-// ✅ NEW: Listen booking status changes and notify ONLY owner
+// ✅ NEW: Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
+// Shows the NAME of the user
+// =========================
+async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
+  try {
+    const userId = (bookingData?.userId || '').toString();
+    const userName = await getUserDisplayNameById(userId);
+
+    // Booking display details (safe)
+    const haircutName = (bookingData?.haircutName || bookingData?.serviceName || 'Booking').toString();
+    const slot = (bookingData?.slot || bookingData?.time || '').toString();
+    const date = (bookingData?.date || bookingData?.day || '').toString();
+
+    const title = 'New Booking Request';
+    const pieces = [];
+    pieces.push(userName);
+    if (haircutName) pieces.push(haircutName);
+    if (date) pieces.push(date);
+    if (slot) pieces.push(slot);
+
+    // TEXT ONLY
+    const body = pieces.filter(Boolean).join(' • ');
+
+    // collect admin tokens
+    const snap = await db.collection('fcm_tokens').get();
+    const tokens = [];
+
+    snap.forEach(doc => {
+      const d = doc.data() || {};
+      const role = (d.role || 'user').toString();
+      const token = (d.token || '').toString();
+
+      if (!token || token.length < 100) return;
+      if (role === 'admin' || role === 'super_admin') {
+        tokens.push(token);
+      }
+    });
+
+    const validTokens = validateTokens(tokens);
+    if (validTokens.length === 0) {
+      console.log('⚠️ No admin tokens found for new booking request');
+      return { successCount: 0, failureCount: 0 };
+    }
+
+    // Multicast limit 500
+    const chunks = chunkArray(validTokens, 500);
+
+    let totalSuccess = 0;
+    let totalFailure = 0;
+
+    for (const chunk of chunks) {
+      const payload = {
+        notification: { title, body },
+        android: {
+          priority: 'high',
+          notification: {
+            channelId: 'booking_channel',
+            sound: 'default',
+            priority: 'max',
+            icon: 'logo',
+            tag: `booking_request_${bookingId}`,
+            clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+          }
+        },
+        apns: { payload: { aps: { sound: 'default' } } },
+        data: {
+          type: 'booking_request',
+          bookingId: (bookingId || '').toString(),
+          userId: (userId || '').toString(),
+          userName: (userName || '').toString(),
+          haircutName: (haircutName || '').toString(),
+          date: (date || '').toString(),
+          slot: (slot || '').toString(),
+          click_action: 'FLUTTER_NOTIFICATION_CLICK',
+          timestamp: new Date().toISOString()
+        },
+        tokens: chunk
+      };
+
+      const resp = await admin.messaging().sendEachForMulticast(payload);
+      totalSuccess += resp.successCount;
+      totalFailure += resp.failureCount;
+
+      if (resp.failureCount > 0) {
+        const toRemove = [];
+        for (let i = 0; i < resp.responses.length; i++) {
+          const r = resp.responses[i];
+          if (!r.success) {
+            const code = r.error?.code;
+            if (
+              code === 'messaging/invalid-registration-token' ||
+              code === 'messaging/registration-token-not-registered' ||
+              code === 'messaging/invalid-argument'
+            ) {
+              toRemove.push(chunk[i]);
+            }
+          }
+        }
+        if (toRemove.length > 0) await cleanupInvalidTokensByList(toRemove);
+      }
+    }
+
+    console.log(`✅ New booking request notif sent to admins. Success=${totalSuccess}, Failed=${totalFailure}`);
+    return { successCount: totalSuccess, failureCount: totalFailure };
+  } catch (e) {
+    console.error('❌ sendNewBookingRequestToAdmins error:', e);
+    return { successCount: 0, failureCount: 0 };
+  }
+}
+
+// =========================
+// ✅ Listen booking status changes and notify ONLY owner
 // =========================
 function listenBookingStatusNotifications() {
   console.log('👂 Listening to Firestore bookings for status changes...');
 
-  // We only need recent changes (avoid huge reads)
   db.collection('bookings')
     .orderBy('createdAt', 'desc')
     .limit(50)
@@ -300,14 +459,11 @@ function listenBookingStatusNotifications() {
           const userId = (data.userId || '').toString();
           const status = (data.status || 'pending').toString();
 
-          // ✅ ignore pending
           if (!status || status === 'pending') continue;
 
-          // ✅ only notify for these statuses
           const allowed = new Set(['approved', 'confirmed', 'declined', 'cancelled', 'completed', 'passed']);
           if (!allowed.has(status)) continue;
 
-          // ✅ claim lock per booking+status (prevents duplicates across render instances)
           const claimed = await claimBookingStatusLock(doc.ref, status);
           if (!claimed) continue;
 
@@ -323,6 +479,53 @@ function listenBookingStatusNotifications() {
       }
     }, (err) => {
       console.error('❌ Firestore bookings listen failed:', err);
+    });
+}
+
+// =========================
+// ✅ NEW: Listen NEW bookings and notify ADMINS on "added"
+// =========================
+function listenNewBookingRequestNotifications() {
+  console.log('👂 Listening to Firestore bookings for NEW booking requests (notify admin)...');
+
+  let firstSnapshot = true;
+
+  db.collection('bookings')
+    .orderBy('createdAt', 'desc')
+    .limit(50)
+    .onSnapshot(async (snapshot) => {
+      try {
+        // ignore initial load so it doesn't spam admins
+        if (firstSnapshot) {
+          firstSnapshot = false;
+          console.log('👂 New booking listener ready (initial snapshot ignored)');
+          return;
+        }
+
+        for (const change of snapshot.docChanges()) {
+          if (change.type !== 'added') continue;
+
+          const doc = change.doc;
+          const data = doc.data() || {};
+          const bookingId = doc.id;
+
+          // only notify admin for pending/new requests
+          const status = (data.status || 'pending').toString();
+          if (status !== 'pending') continue;
+
+          const claimed = await claimBookingRequestLock(doc.ref);
+          if (!claimed) continue;
+
+          await sendNewBookingRequestToAdmins({
+            bookingId,
+            bookingData: data
+          });
+        }
+      } catch (e) {
+        console.error('❌ new booking listener error:', e);
+      }
+    }, (err) => {
+      console.error('❌ Firestore new booking listen failed:', err);
     });
 }
 
@@ -361,7 +564,6 @@ app.post('/store-token', async (req, res) => {
     console.log(`📊 Total unique users (memory): ${userTokens.size}`);
 
     res.status(200).json({ success: true, userId, uniqueUsers: userTokens.size });
-
   } catch (error) {
     console.error('❌ Store error:', error);
     res.status(500).json({ error: error.message });
@@ -390,7 +592,6 @@ app.post('/remove-token', async (req, res) => {
 
     console.log(`📊 Remaining users (memory): ${userTokens.size}`);
     res.status(200).json({ success: true, remainingUsers: userTokens.size });
-
   } catch (error) {
     console.error('❌ Remove error:', error);
     res.status(500).json({ error: error.message });
@@ -424,7 +625,6 @@ app.get('/token-count', async (req, res) => {
       uniqueUsers: uniqueUsers,
       totalDevices: snapshot.size
     });
-
   } catch (error) {
     console.error('❌ Count error:', error);
     res.status(500).json({ error: error.message });
@@ -520,7 +720,6 @@ app.post('/send-to-unique-users', async (req, res) => {
       failureCount: response.failureCount,
       uniqueUsers: uniqueTokens.length
     });
-
   } catch (error) {
     console.error('❌ Send error:', error);
     res.status(500).json({ error: error.message });
@@ -630,7 +829,6 @@ app.post('/send-shop-status', async (req, res) => {
       totalUsers: validTokens.length,
       message: `Shop ${isOpen ? 'opened' : 'closed'} notification sent`
     });
-
   } catch (error) {
     console.error('❌ Shop status error:', error);
     res.status(500).json({ error: error.message });
@@ -863,7 +1061,6 @@ async function autoCloseShop() {
           phHour: currentHour,
           action: 'auto_closed'
         });
-
       } else {
         console.log('⚠️ Auto-close: No valid users to notify');
 
@@ -960,6 +1157,7 @@ app.get('/', (req, res) => {
       roleBasedGroupChatFiltering: true,
       noDuplicateNotifications: true,
       bookingStatusNotifications: true,
+      bookingRequestNotificationsToAdmins: true, // ✅ NEW
       tokenValidation: true,
       autoClose: true,
       autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
@@ -983,8 +1181,11 @@ app.listen(PORT, async () => {
   // ✅ START GROUP CHAT LISTENER
   listenGroupChatNotifications();
 
-  // ✅ START BOOKING STATUS LISTENER (NEW)
+  // ✅ START BOOKING STATUS LISTENER
   listenBookingStatusNotifications();
+
+  // ✅ NEW: START NEW BOOKING REQUEST LISTENER (notify admin)
+  listenNewBookingRequestNotifications();
 });
 
 // Sync tokens from Firestore on startup
