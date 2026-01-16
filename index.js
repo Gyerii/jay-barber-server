@@ -328,28 +328,85 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
 }
 
 // =========================
+// ✅ NEW: helpers for admin booking request format (BOLD NAME + DATE ONLY)
+// =========================
+
+// Convert normal text to Unicode bold (works in notifications)
+function toBoldUnicode(text) {
+  const str = (text || '').toString();
+  const map = {
+    'A':'𝗔','B':'𝗕','C':'𝗖','D':'𝗗','E':'𝗘','F':'𝗙','G':'𝗚','H':'𝗛','I':'𝗜','J':'𝗝','K':'𝗞','L':'𝗟','M':'𝗠','N':'𝗡','O':'𝗢','P':'𝗣','Q':'𝗤','R':'𝗥','S':'𝗦','T':'𝗧','U':'𝗨','V':'𝗩','W':'𝗪','X':'𝗫','Y':'𝗬','Z':'𝗭',
+    'a':'𝗮','b':'𝗯','c':'𝗰','d':'𝗱','e':'𝗲','f':'𝗳','g':'𝗴','h':'𝗵','i':'𝗶','j':'𝗷','k':'𝗸','l':'𝗹','m':'𝗺','n':'𝗻','o':'𝗼','p':'𝗽','q':'𝗾','r':'𝗿','s':'𝘀','t':'𝘁','u':'𝘂','v':'𝘃','w':'𝘄','x':'𝘅','y':'𝘆','z':'𝘇',
+    '0':'𝟬','1':'𝟭','2':'𝟮','3':'𝟯','4':'𝟰','5':'𝟱','6':'𝟲','7':'𝟳','8':'𝟴','9':'𝟵'
+  };
+  return str.split('').map(ch => map[ch] || ch).join('');
+}
+
+// Format booking date into MM/DD/YYYY (no time)
+function formatBookingDate(dateVal) {
+  try {
+    let d = null;
+
+    // Firestore Timestamp
+    if (dateVal && typeof dateVal === 'object' && typeof dateVal.toDate === 'function') {
+      d = dateVal.toDate();
+    } else if (dateVal instanceof Date) {
+      d = dateVal;
+    } else if (typeof dateVal === 'string') {
+      const s = dateVal.trim();
+
+      // already mm/dd/yyyy
+      if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
+        const parts = s.split('/');
+        const mm = String(parseInt(parts[0], 10)).padStart(2, '0');
+        const dd = String(parseInt(parts[1], 10)).padStart(2, '0');
+        const yyyy = String(parts[2]);
+        return `${mm}/${dd}/${yyyy}`;
+      }
+
+      // yyyy-mm-dd
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const [yyyy, mm, dd] = s.split('-');
+        return `${mm}/${dd}/${yyyy}`;
+      }
+
+      // try parseable date string
+      const parsed = new Date(s);
+      if (!isNaN(parsed.getTime())) d = parsed;
+    }
+
+    if (!d) return '';
+
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const yyyy = String(d.getFullYear());
+    return `${mm}/${dd}/${yyyy}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+// =========================
 // ✅ NEW: Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
-// Shows the NAME of the user
+// ✅ Body format: 𝗝𝗼𝗵𝗻 𝗗𝗼𝗲 • Fade Cut • 01/16/2026
+// ✅ No images, no time
 // =========================
 async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
   try {
     const userId = (bookingData?.userId || '').toString();
     const userName = await getUserDisplayNameById(userId);
 
-    // Booking display details (safe)
-    const haircutName = (bookingData?.haircutName || bookingData?.serviceName || 'Booking').toString();
-    const slot = (bookingData?.slot || bookingData?.time || '').toString();
-    const date = (bookingData?.date || bookingData?.day || '').toString();
+    // Haircut name
+    const haircutName = (bookingData?.haircutName || bookingData?.serviceName || 'Booking').toString().trim();
+
+    // Date only
+    const dateVal = bookingData?.date || bookingData?.day || bookingData?.bookingDate;
+    const formattedDate = formatBookingDate(dateVal) || 'Unknown date';
 
     const title = 'New Booking Request';
-    const pieces = [];
-    pieces.push(userName);
-    if (haircutName) pieces.push(haircutName);
-    if (date) pieces.push(date);
-    if (slot) pieces.push(slot);
 
-    // TEXT ONLY
-    const body = pieces.filter(Boolean).join(' • ');
+    // ✅ Bold ONLY user name
+    const body = `${toBoldUnicode(userName)} • ${haircutName} • ${formattedDate}`;
 
     // collect admin tokens
     const snap = await db.collection('fcm_tokens').get();
@@ -361,9 +418,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
       const token = (d.token || '').toString();
 
       if (!token || token.length < 100) return;
-      if (role === 'admin' || role === 'super_admin') {
-        tokens.push(token);
-      }
+      if (role === 'admin' || role === 'super_admin') tokens.push(token);
     });
 
     const validTokens = validateTokens(tokens);
@@ -387,6 +442,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
             channelId: 'booking_channel',
             sound: 'default',
             priority: 'max',
+            // ✅ keep your icon as-is (Android will still show app icon anyway)
             icon: 'logo',
             tag: `booking_request_${bookingId}`,
             clickAction: 'FLUTTER_NOTIFICATION_CLICK',
@@ -399,8 +455,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
           userId: (userId || '').toString(),
           userName: (userName || '').toString(),
           haircutName: (haircutName || '').toString(),
-          date: (date || '').toString(),
-          slot: (slot || '').toString(),
+          date: (formattedDate || '').toString(),
           click_action: 'FLUTTER_NOTIFICATION_CLICK',
           timestamp: new Date().toISOString()
         },
