@@ -509,8 +509,8 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
   const title = (senderName && senderName.trim()) ? senderName.trim() : 'New message';
 
   let body = (message || '').trim();
-  if (messageType === 'image') body = '📷 sent a photo';
-  if (messageType === 'video') body = '🎥 sent a video';
+  if (messageType === 'image') body = 'sent a photo';
+  if (messageType === 'video') body = 'sent a video';
   if (!body) body = 'sent a message';
 
   const chunks = chunkArray(validTokens, 500);
@@ -860,3 +860,4 @@ process.on('SIGINT', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
 });
+
