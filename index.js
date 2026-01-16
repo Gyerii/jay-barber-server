@@ -135,7 +135,7 @@ async function cleanupInvalidTokensByList(tokensList) {
   }
 }
 
-// ✅ IMPORTANT: Transaction lock to prevent duplicate notification
+// ✅ IMPORTANT: Transaction lock to prevent duplicate notification (group chat)
 async function claimNotificationLock(docRef) {
   try {
     const claimed = await db.runTransaction(async (t) => {
@@ -160,6 +160,170 @@ async function claimNotificationLock(docRef) {
     console.error('❌ claimNotificationLock error:', e);
     return false;
   }
+}
+
+// =========================
+// ✅ NEW: BOOKING STATUS NOTIFICATION LOCK (no duplicates across instances)
+// =========================
+async function claimBookingStatusLock(bookingRef, status) {
+  try {
+    const claimed = await db.runTransaction(async (t) => {
+      const snap = await t.get(bookingRef);
+      if (!snap.exists) return false;
+
+      const data = snap.data() || {};
+      const already = (data.bookingNotifiedStatus || '').toString();
+
+      // ✅ already notified for this exact status
+      if (already === status) return false;
+
+      // ✅ set lock
+      t.set(bookingRef, {
+        bookingNotifiedStatus: status,
+        bookingNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+        bookingNotifiedByInstance: process.env.INSTANCE_ID || process.env.RENDER_INSTANCE_ID || 'render'
+      }, { merge: true });
+
+      return true;
+    });
+
+    return claimed === true;
+  } catch (e) {
+    console.error('❌ claimBookingStatusLock error:', e);
+    return false;
+  }
+}
+
+// =========================
+// ✅ NEW: Send BOOKING notification ONLY to booking owner
+// =========================
+async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData }) {
+  try {
+    if (!userId || !status || !bookingId) return;
+
+    // ✅ no notification for pending
+    if (status === 'pending') return;
+
+    // ✅ read token for that user only
+    const tokenDoc = await db.collection('fcm_tokens').doc(userId).get();
+    if (!tokenDoc.exists) {
+      console.log(`⚠️ No token found for booking owner: ${userId}`);
+      return;
+    }
+
+    const token = (tokenDoc.data()?.token || '').toString();
+    if (!token || token.length < 100) {
+      console.log(`⚠️ Invalid token for booking owner: ${userId}`);
+      return;
+    }
+
+    const haircutName = (bookingData?.haircutName || 'Booking').toString();
+    const slot = (bookingData?.slot || '').toString();
+
+    let title = 'Booking Update';
+    let body = `${haircutName} status updated: ${status}`;
+
+    // ✅ Make message nicer
+    if (status === 'approved' || status === 'confirmed') {
+      title = 'Booking Approved';
+      body = slot ? `Your booking is approved for ${slot}.` : 'Your booking is approved.';
+    } else if (status === 'declined') {
+      title = 'Booking Declined';
+      body = 'Sorry, your booking was declined. You can book another schedule.';
+    } else if (status === 'cancelled') {
+      title = 'Booking Cancelled';
+      body = 'Your booking was cancelled.';
+    } else if (status === 'completed') {
+      title = 'Booking Completed';
+      body = 'Your booking is completed. Thank you!';
+    } else if (status === 'passed') {
+      title = 'Booking Passed';
+      body = 'Your booking schedule has passed.';
+    }
+
+    const payload = {
+      notification: { title, body },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'booking_channel',
+          sound: 'default',
+          priority: 'max',
+          icon: 'logo',
+          // ✅ tag makes Android replace duplicates
+          tag: `booking_${bookingId}_${status}`,
+          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+        }
+      },
+      apns: {
+        payload: {
+          aps: { sound: 'default' }
+        }
+      },
+      data: {
+        type: 'booking_status',
+        bookingId: bookingId.toString(),
+        userId: userId.toString(),
+        status: status.toString(),
+        click_action: 'FLUTTER_NOTIFICATION_CLICK',
+        timestamp: new Date().toISOString()
+      },
+      token: token
+    };
+
+    const resp = await admin.messaging().send(payload);
+    console.log(`✅ Booking status notif sent to owner ${userId}: ${status} (msgId=${resp})`);
+  } catch (e) {
+    console.error('❌ sendBookingStatusToOwner error:', e);
+  }
+}
+
+// =========================
+// ✅ NEW: Listen booking status changes and notify ONLY owner
+// =========================
+function listenBookingStatusNotifications() {
+  console.log('👂 Listening to Firestore bookings for status changes...');
+
+  // We only need recent changes (avoid huge reads)
+  db.collection('bookings')
+    .orderBy('createdAt', 'desc')
+    .limit(50)
+    .onSnapshot(async (snapshot) => {
+      try {
+        for (const change of snapshot.docChanges()) {
+          if (change.type !== 'modified') continue;
+
+          const doc = change.doc;
+          const data = doc.data() || {};
+          const bookingId = doc.id;
+
+          const userId = (data.userId || '').toString();
+          const status = (data.status || 'pending').toString();
+
+          // ✅ ignore pending
+          if (!status || status === 'pending') continue;
+
+          // ✅ only notify for these statuses
+          const allowed = new Set(['approved', 'confirmed', 'declined', 'cancelled', 'completed', 'passed']);
+          if (!allowed.has(status)) continue;
+
+          // ✅ claim lock per booking+status (prevents duplicates across render instances)
+          const claimed = await claimBookingStatusLock(doc.ref, status);
+          if (!claimed) continue;
+
+          await sendBookingStatusToOwner({
+            bookingId,
+            userId,
+            status,
+            bookingData: data
+          });
+        }
+      } catch (e) {
+        console.error('❌ bookings listener error:', e);
+      }
+    }, (err) => {
+      console.error('❌ Firestore bookings listen failed:', err);
+    });
 }
 
 // =========================
@@ -399,8 +563,8 @@ app.post('/send-shop-status', async (req, res) => {
 
     const title = isOpen ? 'Shop is Now OPEN!' : 'Shop is Now CLOSED';
     const body = isOpen
-      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! ✂️'
-      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
+      ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs!'
+      : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon!';
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
@@ -529,14 +693,13 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
           priority: 'max',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
           icon: 'logo',
-          // ✅ tag helps Android merge duplicates if ever re-sent
           tag: chatDocId ? `group_chat_${chatDocId}` : 'group_chat'
         }
       },
       apns: { payload: { aps: { sound: 'default' } } },
       data: {
         type: 'group_chat',
-        chatDocId: (chatDocId || '').toString(), // ✅ Stable dedup key for Flutter
+        chatDocId: (chatDocId || '').toString(),
         senderId: (senderId || '').toString(),
         senderName: (senderName || '').toString(),
         senderRole: senderRole,
@@ -597,16 +760,11 @@ function listenGroupChatNotifications() {
           const doc = change.doc;
           const data = doc.data() || {};
 
-          // ✅ IMPORTANT: Lock/claim here (prevents duplicates across Render instances)
           const claimed = await claimNotificationLock(doc.ref);
-          if (!claimed) {
-            // Another server already handled it
-            continue;
-          }
+          if (!claimed) continue;
 
           const messageType = (data.messageType || 'text').toString();
 
-          // ignore system messages (but already locked notified=true)
           if (messageType === 'system' || messageType === 'group_update') {
             continue;
           }
@@ -664,7 +822,7 @@ async function autoCloseShop() {
 
       if (validTokens.length > 0) {
         const title = 'Shop is Now CLOSED';
-        const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
+        const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon!';
 
         console.log(`📤 Auto-close: Sending notification to ${validTokens.length} users`);
 
@@ -801,6 +959,7 @@ app.get('/', (req, res) => {
       groupChatNotifications: true,
       roleBasedGroupChatFiltering: true,
       noDuplicateNotifications: true,
+      bookingStatusNotifications: true,
       tokenValidation: true,
       autoClose: true,
       autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
@@ -823,6 +982,9 @@ app.listen(PORT, async () => {
 
   // ✅ START GROUP CHAT LISTENER
   listenGroupChatNotifications();
+
+  // ✅ START BOOKING STATUS LISTENER (NEW)
+  listenBookingStatusNotifications();
 });
 
 // Sync tokens from Firestore on startup
@@ -860,4 +1022,3 @@ process.on('SIGINT', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
 });
-
