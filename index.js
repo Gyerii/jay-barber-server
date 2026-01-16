@@ -106,7 +106,7 @@ async function getUserRoleById(userId) {
   }
 }
 
-// ✅ Role-based filtering rule:
+// ✅ Role-based filtering rule (YOUR REQUEST):
 // - always skip senderId
 // - if senderRole is admin => skip all admin recipients
 // - if senderRole is super_admin => skip all super_admin recipients
@@ -116,7 +116,7 @@ function shouldSkipRecipient({ senderId, senderRole, recipientUserId, recipientR
   // Always skip sender
   if (senderId && recipientUserId === senderId) return true;
 
-  // Role-group suppression for staff:
+  // Staff group suppression:
   if (senderRole === 'admin' && recipientRole === 'admin') return true;
   if (senderRole === 'super_admin' && recipientRole === 'super_admin') return true;
 
@@ -135,6 +135,33 @@ async function cleanupInvalidTokensByList(tokensList) {
   }
 }
 
+// ✅ IMPORTANT: Transaction lock to prevent duplicate notification
+async function claimNotificationLock(docRef) {
+  try {
+    const claimed = await db.runTransaction(async (t) => {
+      const snap = await t.get(docRef);
+      if (!snap.exists) return false;
+
+      const data = snap.data() || {};
+      if (data.notified === true) return false;
+
+      // claim lock
+      t.set(docRef, {
+        notified: true,
+        notifiedAt: admin.firestore.FieldValue.serverTimestamp(),
+        notifiedByInstance: process.env.INSTANCE_ID || process.env.RENDER_INSTANCE_ID || 'render'
+      }, { merge: true });
+
+      return true;
+    });
+
+    return claimed === true;
+  } catch (e) {
+    console.error('❌ claimNotificationLock error:', e);
+    return false;
+  }
+}
+
 // =========================
 // ✅ TOKEN STORE - ONE per user
 // =========================
@@ -143,19 +170,13 @@ app.post('/store-token', async (req, res) => {
     const { token, userId, role, deviceInfo } = req.body;
 
     if (!token || !userId) {
-      return res.status(400).json({
-        error: 'Token and userId required'
-      });
+      return res.status(400).json({ error: 'Token and userId required' });
     }
 
-    // Validate token format (length only – no startsWith check)
     if (typeof token !== 'string' || token.length < 100) {
-      return res.status(400).json({
-        error: 'Invalid token format'
-      });
+      return res.status(400).json({ error: 'Invalid token format' });
     }
 
-    // Store in memory - overwrites if user already exists
     userTokens.set(userId, {
       token,
       userId,
@@ -164,7 +185,6 @@ app.post('/store-token', async (req, res) => {
       lastUpdated: new Date().toISOString()
     });
 
-    // Store in Firestore with userId as document ID
     await db.collection('fcm_tokens').doc(userId).set({
       token,
       userId,
@@ -176,11 +196,7 @@ app.post('/store-token', async (req, res) => {
     console.log(`✅ Token stored for: ${userId} (${role || 'user'})`);
     console.log(`📊 Total unique users (memory): ${userTokens.size}`);
 
-    res.status(200).json({
-      success: true,
-      userId,
-      uniqueUsers: userTokens.size
-    });
+    res.status(200).json({ success: true, userId, uniqueUsers: userTokens.size });
 
   } catch (error) {
     console.error('❌ Store error:', error);
@@ -198,7 +214,6 @@ app.post('/remove-token', async (req, res) => {
       await db.collection('fcm_tokens').doc(userId).delete();
       console.log(`🗑️ Removed: ${userId}`);
     } else if (token) {
-      // Find by token
       for (let [key, value] of userTokens.entries()) {
         if (value.token === token) {
           userTokens.delete(key);
@@ -210,11 +225,7 @@ app.post('/remove-token', async (req, res) => {
     }
 
     console.log(`📊 Remaining users (memory): ${userTokens.size}`);
-
-    res.status(200).json({
-      success: true,
-      remainingUsers: userTokens.size
-    });
+    res.status(200).json({ success: true, remainingUsers: userTokens.size });
 
   } catch (error) {
     console.error('❌ Remove error:', error);
@@ -225,7 +236,6 @@ app.post('/remove-token', async (req, res) => {
 // Get user count
 app.get('/token-count', async (req, res) => {
   try {
-    // Sync with Firestore
     const snapshot = await db.collection('fcm_tokens').get();
 
     userTokens.clear();
@@ -243,7 +253,6 @@ app.get('/token-count', async (req, res) => {
     });
 
     const uniqueUsers = userTokens.size;
-
     console.log(`📊 Unique users (Firestore): ${uniqueUsers}`);
 
     res.status(200).json({
@@ -259,7 +268,7 @@ app.get('/token-count', async (req, res) => {
 });
 
 // =========================
-// ✅ SEND TO UNIQUE USERS (your endpoint)
+// ✅ SEND TO UNIQUE USERS
 // =========================
 app.post('/send-to-unique-users', async (req, res) => {
   try {
@@ -310,9 +319,7 @@ app.post('/send-to-unique-users', async (req, res) => {
           icon: 'logo'
         }
       },
-      apns: {
-        payload: { aps: { sound: 'default', badge: 1 } }
-      },
+      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
       data: {
         type: 'general_notification',
         timestamp: new Date().toISOString(),
@@ -326,17 +333,15 @@ app.post('/send-to-unique-users', async (req, res) => {
     console.log(`✅ Success: ${response.successCount}`);
     console.log(`❌ Failed: ${response.failureCount}`);
 
-    // Remove invalid tokens
     if (response.failureCount > 0) {
       const tokensToRemove = [];
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
-          const errorCode = resp.error?.code;
-          console.log(`❌ Token ${idx}: ${errorCode}`);
+          const code = resp.error?.code;
           if (
-            errorCode === 'messaging/invalid-registration-token' ||
-            errorCode === 'messaging/registration-token-not-registered' ||
-            errorCode === 'messaging/invalid-argument'
+            code === 'messaging/invalid-registration-token' ||
+            code === 'messaging/registration-token-not-registered' ||
+            code === 'messaging/invalid-argument'
           ) {
             tokensToRemove.push(uniqueTokens[idx]);
           }
@@ -359,7 +364,7 @@ app.post('/send-to-unique-users', async (req, res) => {
 });
 
 // =========================
-// ✅ SHOP STATUS NOTIFICATION (your endpoint)
+// ✅ SHOP STATUS NOTIFICATION
 // =========================
 app.post('/send-shop-status', async (req, res) => {
   try {
@@ -431,11 +436,11 @@ app.post('/send-shop-status', async (req, res) => {
       const badTokens = [];
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
-          const errorCode = resp.error?.code;
+          const code = resp.error?.code;
           if (
-            errorCode === 'messaging/invalid-registration-token' ||
-            errorCode === 'messaging/registration-token-not-registered' ||
-            errorCode === 'messaging/invalid-argument'
+            code === 'messaging/invalid-registration-token' ||
+            code === 'messaging/registration-token-not-registered' ||
+            code === 'messaging/invalid-argument'
           ) {
             badTokens.push(validTokens[idx]);
             const userIdToRemove = userIds[idx];
@@ -469,9 +474,9 @@ app.post('/send-shop-status', async (req, res) => {
 });
 
 // =========================
-// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED)
+// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED + NO DUPLICATES)
 // =========================
-async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, messageType, message }) {
+async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, senderName, messageType, message }) {
   const senderRole = await getUserRoleById(senderId);
 
   const snap = await db.collection('fcm_tokens').get();
@@ -485,7 +490,6 @@ async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, mes
 
     if (!token || typeof token !== 'string') return;
 
-    // ✅ Apply your requested filtering rule
     if (shouldSkipRecipient({
       senderId,
       senderRole,
@@ -509,7 +513,6 @@ async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, mes
   if (messageType === 'video') body = '🎥 sent a video';
   if (!body) body = 'sent a message';
 
-  // FCM multicast limit: 500
   const chunks = chunkArray(validTokens, 500);
 
   let totalSuccess = 0;
@@ -525,15 +528,18 @@ async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, mes
           sound: 'default',
           priority: 'max',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo'
+          icon: 'logo',
+          // ✅ tag helps Android merge duplicates if ever re-sent
+          tag: chatDocId ? `group_chat_${chatDocId}` : 'group_chat'
         }
       },
       apns: { payload: { aps: { sound: 'default' } } },
       data: {
         type: 'group_chat',
+        chatDocId: (chatDocId || '').toString(), // ✅ Stable dedup key for Flutter
         senderId: (senderId || '').toString(),
         senderName: (senderName || '').toString(),
-        senderRole: senderRole, // ✅ VERY IMPORTANT for Flutter safety filter
+        senderRole: senderRole,
         messageType: (messageType || 'text').toString(),
         message: (message || '').toString(),
         timestamp: new Date().toISOString(),
@@ -546,7 +552,6 @@ async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, mes
     totalSuccess += resp.successCount;
     totalFailure += resp.failureCount;
 
-    // Cleanup invalid tokens
     if (resp.failureCount > 0) {
       const toRemove = [];
       for (let i = 0; i < resp.responses.length; i++) {
@@ -566,7 +571,7 @@ async function sendGroupChatNotificationRoleFiltered({ senderId, senderName, mes
     }
   }
 
-  console.log(`✅ Group chat role-filter notif done. Success=${totalSuccess}, Failed=${totalFailure}`);
+  console.log(`✅ Group chat notif done. Success=${totalSuccess}, Failed=${totalFailure}`);
   return { successCount: totalSuccess, failureCount: totalFailure };
 }
 
@@ -577,7 +582,7 @@ function listenGroupChatNotifications() {
 
   db.collection('group_chat')
     .orderBy('timestamp', 'desc')
-    .limit(20)
+    .limit(25)
     .onSnapshot(async (snapshot) => {
       try {
         if (firstSnapshot) {
@@ -592,28 +597,22 @@ function listenGroupChatNotifications() {
           const doc = change.doc;
           const data = doc.data() || {};
 
-          if (data.notified === true) continue;
-
-          const messageType = (data.messageType || 'text').toString();
-
-          // ignore system messages but mark notified
-          if (messageType === 'system' || messageType === 'group_update') {
-            await doc.ref.set({
-              notified: true,
-              notifiedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
+          // ✅ IMPORTANT: Lock/claim here (prevents duplicates across Render instances)
+          const claimed = await claimNotificationLock(doc.ref);
+          if (!claimed) {
+            // Another server already handled it
             continue;
           }
 
-          // mark notified first (reduce duplicates)
-          await doc.ref.set({
-            notified: true,
-            notifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-            notifiedByInstance: process.env.INSTANCE_ID || 'render'
-          }, { merge: true });
+          const messageType = (data.messageType || 'text').toString();
 
-          // ✅ use ROLE FILTERED sender logic now
+          // ignore system messages (but already locked notified=true)
+          if (messageType === 'system' || messageType === 'group_update') {
+            continue;
+          }
+
           await sendGroupChatNotificationRoleFiltered({
+            chatDocId: doc.id,
             senderId: (data.senderId || '').toString(),
             senderName: (data.senderName || 'Someone').toString(),
             messageType,
@@ -770,7 +769,7 @@ function scheduleAutoClose() {
   }, { scheduled: true, timezone: 'Asia/Manila' });
 }
 
-// Manual trigger for testing auto-close
+// Manual trigger
 app.post('/trigger-auto-close', async (req, res) => {
   try {
     console.log('🔧 Manual auto-close trigger');
@@ -789,98 +788,6 @@ app.post('/trigger-auto-close', async (req, res) => {
   }
 });
 
-// Get auto-close logs
-app.get('/auto-close-logs', async (req, res) => {
-  try {
-    const snapshot = await db.collection('auto_close_logs')
-      .orderBy('timestamp', 'desc')
-      .limit(50)
-      .get();
-
-    const logs = [];
-    snapshot.forEach(doc => {
-      logs.push({ id: doc.id, ...doc.data() });
-    });
-
-    res.status(200).json({
-      success: true,
-      logs: logs,
-      total: logs.length,
-      currentTime: {
-        phTime: getPhilippineTime(),
-        phHour: getCurrentPhilippineHour(),
-        utcTime: new Date().toISOString()
-      }
-    });
-  } catch (error) {
-    console.error('❌ Logs error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get current shop status
-app.get('/shop-status', async (req, res) => {
-  try {
-    const shopDoc = await db.collection('shop_status').doc('current').get();
-
-    if (shopDoc.exists) {
-      res.status(200).json({
-        success: true,
-        isOpen: shopDoc.data().isOpen || false,
-        lastUpdated: shopDoc.data().updatedAt,
-        autoClosed: shopDoc.data().autoClosed || false,
-        currentTime: {
-          phTime: getPhilippineTime(),
-          phHour: getCurrentPhilippineHour()
-        }
-      });
-    } else {
-      res.status(200).json({
-        success: true,
-        isOpen: false,
-        message: 'No shop status found',
-        currentTime: {
-          phTime: getPhilippineTime(),
-          phHour: getCurrentPhilippineHour()
-        }
-      });
-    }
-  } catch (error) {
-    console.error('❌ Shop status error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Test endpoint to check tokens
-app.get('/debug-tokens', async (req, res) => {
-  try {
-    const snapshot = await db.collection('fcm_tokens').get();
-    const tokens = [];
-
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      tokens.push({
-        userId: data.userId,
-        token: data.token ? `${data.token.substring(0, 50)}...` : 'MISSING',
-        role: data.role,
-        isValid: data.token && typeof data.token === 'string' && data.token.length > 100
-      });
-    });
-
-    res.status(200).json({
-      totalTokens: snapshot.size,
-      tokens: tokens,
-      currentTime: {
-        phTime: getPhilippineTime(),
-        phHour: getCurrentPhilippineHour()
-      }
-    });
-  } catch (error) {
-    console.error('❌ Debug error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Health check
 app.get('/', (req, res) => {
   res.status(200).json({
@@ -892,15 +799,16 @@ app.get('/', (req, res) => {
     port: process.env.PORT,
     features: {
       groupChatNotifications: true,
+      roleBasedGroupChatFiltering: true,
+      noDuplicateNotifications: true,
       tokenValidation: true,
       autoClose: true,
-      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)',
-      roleBasedGroupChatFiltering: true
+      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
     }
   });
 });
 
-// Start server - Use Render's port
+// Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
