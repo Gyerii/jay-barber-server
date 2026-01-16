@@ -39,69 +39,17 @@ admin.initializeApp({
 const db = admin.firestore();
 
 // Memory storage for quick access
-const userTokens = new Map(); // userId -> {token,userId,role,deviceInfo,lastUpdated}
+const userTokens = new Map(); // userId -> token
 
 console.log('🚀 Firebase Admin initialized');
 
-// =========================
-// ✅ HELPERS
-// =========================
-function validateTokens(tokens) {
-  const validTokens = [];
-  const invalidTokens = [];
-
-  tokens.forEach(token => {
-    if (typeof token === 'string' && token.length > 100) {
-      validTokens.push(token);
-    } else {
-      invalidTokens.push(token);
-    }
-  });
-
-  if (invalidTokens.length > 0) {
-    console.log(`⚠️ Invalid tokens found: ${invalidTokens.length}`);
-  }
-
-  console.log(`🔍 validateTokens: ${validTokens.length}/${tokens.length} valid`);
-  return validTokens;
-}
-
-function chunkArray(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-// Get current Philippine time
-function getPhilippineTime() {
-  return new Date().toLocaleString('en-US', {
-    timeZone: 'Asia/Manila',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  });
-}
-
-// Get current hour in Philippine Time
-function getCurrentPhilippineHour() {
-  const now = new Date();
-  const phTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
-  return phTime.getHours();
-}
-
-// =========================
-// ✅ TOKEN STORE - ONE per user
-// =========================
+// Store token - ONE per user
 app.post('/store-token', async (req, res) => {
   try {
     const { token, userId, role, deviceInfo } = req.body;
 
     if (!token || !userId) {
-      return res.status(400).json({
+      return res.status(400).json({ 
         error: 'Token and userId required'
       });
     }
@@ -134,7 +82,7 @@ app.post('/store-token', async (req, res) => {
     console.log(`✅ Token stored for: ${userId} (${role || 'user'})`);
     console.log(`📊 Total unique users (memory): ${userTokens.size}`);
 
-    res.status(200).json({
+    res.status(200).json({ 
       success: true,
       userId,
       uniqueUsers: userTokens.size
@@ -169,7 +117,7 @@ app.post('/remove-token', async (req, res) => {
 
     console.log(`📊 Remaining users (memory): ${userTokens.size}`);
 
-    res.status(200).json({
+    res.status(200).json({ 
       success: true,
       remainingUsers: userTokens.size
     });
@@ -185,7 +133,7 @@ app.get('/token-count', async (req, res) => {
   try {
     // Sync with Firestore
     const snapshot = await db.collection('fcm_tokens').get();
-
+    
     userTokens.clear();
     snapshot.forEach(doc => {
       const data = doc.data();
@@ -204,7 +152,7 @@ app.get('/token-count', async (req, res) => {
 
     console.log(`📊 Unique users (Firestore): ${uniqueUsers}`);
 
-    res.status(200).json({
+    res.status(200).json({ 
       activeTokens: uniqueUsers,
       uniqueUsers: uniqueUsers,
       totalDevices: snapshot.size
@@ -216,12 +164,35 @@ app.get('/token-count', async (req, res) => {
   }
 });
 
-// =========================
-// ✅ SEND TO UNIQUE USERS (your endpoint)
-// =========================
+// Validate tokens before sending
+function validateTokens(tokens) {
+  const validTokens = [];
+  const invalidTokens = [];
+  
+  tokens.forEach(token => {
+    if (typeof token === 'string' && token.length > 100) {
+      // ✅ Consider as valid FCM token
+      validTokens.push(token);
+    } else {
+      invalidTokens.push(token);
+    }
+  });
+  
+  if (invalidTokens.length > 0) {
+    console.log(`⚠️ Invalid tokens found: ${invalidTokens.length}`);
+    invalidTokens.forEach(token => {
+      console.log(`❌ Invalid token: ${token ? token.substring(0, 50) + '...' : token}`);
+    });
+  }
+
+  console.log(`🔍 validateTokens: ${validTokens.length}/${tokens.length} valid`);
+  return validTokens;
+}
+
+// Send to unique users - WITH LOGO ONLY (NO COLORS)
 app.post('/send-to-unique-users', async (req, res) => {
   try {
-    const { title, body, tokens } = req.body;
+    const { title, body, tokens, userIds } = req.body;
 
     if (!title || !body) {
       return res.status(400).json({ error: 'Title and body required' });
@@ -230,17 +201,24 @@ app.post('/send-to-unique-users', async (req, res) => {
     let uniqueTokens = [];
 
     if (tokens && Array.isArray(tokens)) {
+      // Use provided tokens (already unique)
       uniqueTokens = [...new Set(tokens)];
     } else {
+      // Get from Firestore
       const snapshot = await db.collection('fcm_tokens').get();
       const tokenSet = new Set();
+
       snapshot.forEach(doc => {
         const data = doc.data();
-        if (data.token) tokenSet.add(data.token);
+        if (data.token && data.userId) {
+          tokenSet.add(data.token);
+        }
       });
+
       uniqueTokens = Array.from(tokenSet);
     }
 
+    // Validate tokens before sending
     uniqueTokens = validateTokens(uniqueTokens);
 
     if (uniqueTokens.length === 0) {
@@ -255,8 +233,12 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
 
+    // Prepare message with LOGO ONLY (NO COLORS)
     const message = {
-      notification: { title, body },
+      notification: { 
+        title, 
+        body
+      },
       android: {
         priority: 'high',
         notification: {
@@ -265,11 +247,16 @@ app.post('/send-to-unique-users', async (req, res) => {
           priority: 'max',
           tag: 'shop_status',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo'
+          icon: 'logo', // LOGO ONLY - NO COLOR
         }
       },
       apns: {
-        payload: { aps: { sound: 'default', badge: 1 } }
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+          }
+        }
       },
       data: {
         type: 'general_notification',
@@ -279,6 +266,7 @@ app.post('/send-to-unique-users', async (req, res) => {
       tokens: uniqueTokens
     };
 
+    // Send notification
     const response = await admin.messaging().sendEachForMulticast(message);
 
     console.log(`✅ Success: ${response.successCount}`);
@@ -287,12 +275,12 @@ app.post('/send-to-unique-users', async (req, res) => {
     // Remove invalid tokens
     if (response.failureCount > 0) {
       const tokensToRemove = [];
-
+      
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
           const errorCode = resp.error?.code;
           console.log(`❌ Token ${idx}: ${errorCode}`);
-
+          
           if (
             errorCode === 'messaging/invalid-registration-token' ||
             errorCode === 'messaging/registration-token-not-registered' ||
@@ -303,12 +291,15 @@ app.post('/send-to-unique-users', async (req, res) => {
         }
       });
 
+      // Clean up invalid tokens
       for (const token of tokensToRemove) {
-        const badDocs = await db.collection('fcm_tokens').where('token', '==', token).get();
-        for (const d of badDocs.docs) {
-          userTokens.delete(d.id);
-          await db.collection('fcm_tokens').doc(d.id).delete();
-          console.log(`🗑️ Cleaned invalid token doc: ${d.id}`);
+        for (let [userId, data] of userTokens.entries()) {
+          if (data.token === token) {
+            userTokens.delete(userId);
+            await db.collection('fcm_tokens').doc(userId).delete();
+            console.log(`🗑️ Cleaned invalid token: ${userId}`);
+            break;
+          }
         }
       }
     }
@@ -326,9 +317,7 @@ app.post('/send-to-unique-users', async (req, res) => {
   }
 });
 
-// =========================
-// ✅ SHOP STATUS NOTIFICATION (your endpoint)
-// =========================
+// Enhanced notification with custom messages - LOGO ONLY (NO COLORS)
 app.post('/send-shop-status', async (req, res) => {
   try {
     const { isOpen } = req.body;
@@ -337,19 +326,21 @@ app.post('/send-shop-status', async (req, res) => {
       return res.status(400).json({ error: 'isOpen boolean required' });
     }
 
+    // Get unique tokens from Firestore
     const snapshot = await db.collection('fcm_tokens').get();
-    const tokens = [];
+    const uniqueTokens = [];
     const userIds = [];
 
     snapshot.forEach(doc => {
       const data = doc.data();
       if (data.token && data.userId) {
-        tokens.push(data.token);
+        uniqueTokens.push(data.token);
         userIds.push(data.userId);
       }
     });
 
-    const validTokens = validateTokens(tokens);
+    // Validate tokens
+    const validTokens = validateTokens(uniqueTokens);
 
     if (validTokens.length === 0) {
       return res.status(200).json({
@@ -360,15 +351,20 @@ app.post('/send-shop-status', async (req, res) => {
       });
     }
 
+    // Enhanced message content
     const title = isOpen ? 'Shop is Now OPEN!' : 'Shop is Now CLOSED';
-    const body = isOpen
+    const body = isOpen 
       ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs! ✂️'
       : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
+    // Enhanced message WITH LOGO ONLY (NO COLORS)
     const message = {
-      notification: { title, body },
+      notification: { 
+        title, 
+        body
+      },
       android: {
         priority: 'high',
         notification: {
@@ -377,16 +373,24 @@ app.post('/send-shop-status', async (req, res) => {
           priority: 'max',
           tag: 'shop_status',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo'
+          icon: 'logo', // LOGO ONLY - NO COLOR
         }
       },
-      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+          }
+        }
+      },
       data: {
         type: 'shop_status',
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
-        icon: 'logo'
+        icon: 'logo',
+        // NO COLOR IN DATA
       },
       tokens: validTokens
     };
@@ -395,6 +399,7 @@ app.post('/send-shop-status', async (req, res) => {
 
     console.log(`✅ Shop status sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
 
+    // Cleanup invalid tokens
     if (response.failureCount > 0) {
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
@@ -404,7 +409,9 @@ app.post('/send-shop-status', async (req, res) => {
             errorCode === 'messaging/registration-token-not-registered' ||
             errorCode === 'messaging/invalid-argument'
           ) {
+            const tokenToRemove = validTokens[idx];
             const userIdToRemove = userIds[idx];
+            
             if (userIdToRemove) {
               userTokens.delete(userIdToRemove);
               db.collection('fcm_tokens').doc(userIdToRemove).delete();
@@ -430,170 +437,40 @@ app.post('/send-shop-status', async (req, res) => {
   }
 });
 
-// =========================
-// ✅ NEW FEATURE: GROUP CHAT NOTIFICATION TO ALL USERS
-// - Watches 'group_chat' Firestore
-// - Sends notif when new message added
-// - Prevent duplicates using "notified: true"
-// =========================
-async function sendGroupChatNotificationToAll({ senderId, senderName, messageType, message }) {
-  const snap = await db.collection('fcm_tokens').get();
-
-  const tokens = [];
-  snap.forEach(doc => {
-    const data = doc.data();
-    if (!data?.token || !data?.userId) return;
-    if (data.userId === senderId) return; // ✅ don't notify sender
-    tokens.push(data.token);
+// Get current Philippine time
+function getPhilippineTime() {
+  return new Date().toLocaleString('en-US', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
   });
-
-  const validTokens = validateTokens(tokens);
-  if (validTokens.length === 0) {
-    console.log('⚠️ No valid users to notify for group chat');
-    return { successCount: 0, failureCount: 0 };
-  }
-
-  const title = (senderName && senderName.trim()) ? senderName.trim() : 'New message';
-
-  let body = (message || '').trim();
-  if (messageType === 'image') body = '📷 sent a photo';
-  if (messageType === 'video') body = '🎥 sent a video';
-  if (!body) body = 'sent a message';
-
-  // FCM multicast limit: 500
-  const chunks = chunkArray(validTokens, 500);
-
-  let totalSuccess = 0;
-  let totalFailure = 0;
-
-  for (const chunk of chunks) {
-    const payload = {
-      notification: { title, body },
-      android: {
-        priority: 'high',
-        notification: {
-          channelId: 'group_chat_channel',
-          sound: 'default',
-          priority: 'max',
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          icon: 'logo'
-        }
-      },
-      apns: { payload: { aps: { sound: 'default' } } },
-      data: {
-        type: 'group_chat',
-        senderId: senderId || '',
-        senderName: senderName || '',
-        messageType: messageType || 'text',
-        message: (message || '').toString(),
-        timestamp: new Date().toISOString(),
-        click_action: 'FLUTTER_NOTIFICATION_CLICK'
-      },
-      tokens: chunk
-    };
-
-    const resp = await admin.messaging().sendEachForMulticast(payload);
-    totalSuccess += resp.successCount;
-    totalFailure += resp.failureCount;
-
-    // cleanup invalid tokens
-    if (resp.failureCount > 0) {
-      for (let i = 0; i < resp.responses.length; i++) {
-        const r = resp.responses[i];
-        if (!r.success) {
-          const code = r.error?.code;
-          if (
-            code === 'messaging/invalid-registration-token' ||
-            code === 'messaging/registration-token-not-registered' ||
-            code === 'messaging/invalid-argument'
-          ) {
-            const badToken = chunk[i];
-            const badDocs = await db.collection('fcm_tokens').where('token', '==', badToken).get();
-            for (const d of badDocs.docs) {
-              userTokens.delete(d.id);
-              await db.collection('fcm_tokens').doc(d.id).delete();
-              console.log(`🗑️ Removed invalid token doc: ${d.id}`);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  console.log(`✅ Group chat notif done. Success=${totalSuccess}, Failed=${totalFailure}`);
-  return { successCount: totalSuccess, failureCount: totalFailure };
 }
 
-function listenGroupChatNotifications() {
-  console.log('👂 Listening to Firestore group_chat for new messages...');
-
-  let firstSnapshot = true;
-
-  db.collection('group_chat')
-    .orderBy('timestamp', 'desc')
-    .limit(20)
-    .onSnapshot(async (snapshot) => {
-      try {
-        if (firstSnapshot) {
-          firstSnapshot = false;
-          console.log('👂 Listener ready (initial snapshot ignored)');
-          return;
-        }
-
-        for (const change of snapshot.docChanges()) {
-          if (change.type !== 'added') continue;
-
-          const doc = change.doc;
-          const data = doc.data() || {};
-
-          if (data.notified === true) continue;
-
-          const messageType = (data.messageType || 'text').toString();
-
-          // ignore system messages but mark notified
-          if (messageType === 'system' || messageType === 'group_update') {
-            await doc.ref.set({
-              notified: true,
-              notifiedAt: admin.firestore.FieldValue.serverTimestamp()
-            }, { merge: true });
-            continue;
-          }
-
-          // mark notified first (reduce duplicates)
-          await doc.ref.set({
-            notified: true,
-            notifiedAt: admin.firestore.FieldValue.serverTimestamp(),
-            notifiedByInstance: process.env.INSTANCE_ID || 'render'
-          }, { merge: true });
-
-          await sendGroupChatNotificationToAll({
-            senderId: (data.senderId || '').toString(),
-            senderName: (data.senderName || 'Someone').toString(),
-            messageType,
-            message: (data.message || '').toString()
-          });
-        }
-      } catch (e) {
-        console.error('❌ group_chat listener error:', e);
-      }
-    }, (err) => {
-      console.error('❌ Firestore listen failed:', err);
-    });
+// Get current hour in Philippine Time
+function getCurrentPhilippineHour() {
+  const now = new Date();
+  const phTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+  return phTime.getHours();
 }
 
-// =========================
-// AUTO-CLOSE SHOP (your full logic)
-// =========================
+// Auto-close shop at 5PM Philippine Time - LOGO ONLY (NO COLORS)
 async function autoCloseShop() {
   try {
     const currentHour = getCurrentPhilippineHour();
     console.log(`🕔 Auto-close: Checking shop status at ${getPhilippineTime()} (Hour: ${currentHour})...`);
-
+    
+    // Get current shop status
     const shopDoc = await db.collection('shop_status').doc('current').get();
-
+    
     if (shopDoc.exists && shopDoc.data().isOpen === true) {
       console.log('🕔 Auto-close: Shop is open, closing now...');
-
+      
+      // Update Firestore status to closed
       await db.collection('shop_status').doc('current').set({
         isOpen: false,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -602,6 +479,7 @@ async function autoCloseShop() {
         lastAutoClose: new Date().toISOString()
       }, { merge: true });
 
+      // Get unique tokens from Firestore
       const snapshot = await db.collection('fcm_tokens').get();
       const uniqueTokens = [];
       const userIds = [];
@@ -614,16 +492,21 @@ async function autoCloseShop() {
         }
       });
 
+      // Validate tokens
       const validTokens = validateTokens(uniqueTokens);
 
       if (validTokens.length > 0) {
+        // Send auto-close notification - LOGO ONLY (NO COLORS)
         const title = 'Shop is Now CLOSED';
         const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon! 👋';
 
         console.log(`📤 Auto-close: Sending notification to ${validTokens.length} users`);
 
         const message = {
-          notification: { title, body },
+          notification: { 
+            title, 
+            body
+          },
           android: {
             priority: 'high',
             notification: {
@@ -632,24 +515,33 @@ async function autoCloseShop() {
               priority: 'max',
               tag: 'shop_status',
               clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-              icon: 'logo'
+              icon: 'logo', // LOGO ONLY - NO COLOR
             }
           },
-          apns: { payload: { aps: { sound: 'default', badge: 1 } } },
+          apns: {
+            payload: {
+              aps: {
+                sound: 'default',
+                badge: 1,
+              }
+            }
+          },
           data: {
             type: 'shop_status',
             status: 'closed',
             auto_closed: 'true',
             timestamp: new Date().toISOString(),
             click_action: 'FLUTTER_NOTIFICATION_CLICK',
-            icon: 'logo'
+            icon: 'logo',
+            // NO COLOR IN DATA
           },
           tokens: validTokens
         };
 
         const response = await admin.messaging().sendEachForMulticast(message);
         console.log(`✅ Auto-close: Notification sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
-
+        
+        // Log the auto-close event
         await db.collection('auto_close_logs').add({
           timestamp: new Date().toISOString(),
           usersNotified: validTokens.length,
@@ -659,10 +551,11 @@ async function autoCloseShop() {
           phHour: currentHour,
           action: 'auto_closed'
         });
-
+        
       } else {
         console.log('⚠️ Auto-close: No valid users to notify');
-
+        
+        // Log even if no users to notify
         await db.collection('auto_close_logs').add({
           timestamp: new Date().toISOString(),
           usersNotified: 0,
@@ -673,11 +566,12 @@ async function autoCloseShop() {
           action: 'auto_closed_no_users'
         });
       }
-
+      
       console.log('✅ Auto-close: Shop successfully closed at 5PM PH Time');
     } else {
       console.log('ℹ️ Auto-close: Shop is already closed, no action needed');
-
+      
+      // Log that shop was already closed
       await db.collection('auto_close_logs').add({
         timestamp: new Date().toISOString(),
         usersNotified: 0,
@@ -691,7 +585,8 @@ async function autoCloseShop() {
     }
   } catch (error) {
     console.error('❌ Auto-close error:', error);
-
+    
+    // Log the error
     await db.collection('auto_close_errors').add({
       timestamp: new Date().toISOString(),
       error: error.message,
@@ -701,18 +596,42 @@ async function autoCloseShop() {
   }
 }
 
+// Enhanced auto-close with multiple fallbacks
 function scheduleAutoClose() {
   console.log('⏰ ENHANCED Auto-close scheduled: 5PM Philippine Time every day (17:00 Asia/Manila)');
-
-  cron.schedule('0 17 * * *', async () => {
+  
+  // 1. MAIN: Exact 5:00 PM trigger
+  const mainTask = cron.schedule('0 17 * * *', async () => {
     console.log('⏰ 🎯 MAIN: Exact 5:00 PM auto-close triggered');
     console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
     console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
+    
     await autoCloseShop();
-  }, { scheduled: true, timezone: 'Asia/Manila' });
+  }, {
+    scheduled: true,
+    timezone: 'Asia/Manila'
+  });
 
-  cron.schedule('2 17 * * *', async () => {
+  // 2. BACKUP: Runs every minute from 4:59 PM to 5:01 PM
+  const backupTask = cron.schedule('59-01 16-17 * * *', async () => {
+    const currentHour = getCurrentPhilippineHour();
+    const currentMinute = new Date().getMinutes();
+    
+    if (currentHour === 17 && currentMinute === 0) {
+      console.log('⏰ 🔄 BACKUP: Auto-close triggered by backup at exact 5:00 PM');
+      console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
+      await autoCloseShop();
+    }
+  }, {
+    scheduled: true,
+    timezone: 'Asia/Manila'
+  });
+
+  // 3. SAFETY: Additional check at 5:02 PM in case both above miss
+  const safetyTask = cron.schedule('2 17 * * *', async () => {
     console.log('⏰ 🛡️ SAFETY: 5:02 PM safety check triggered');
+    
+    // Check if shop is still open and auto-close if needed
     const shopDoc = await db.collection('shop_status').doc('current').get();
     if (shopDoc.exists && shopDoc.data().isOpen === true) {
       console.log('⏰ 🛡️ SAFETY: Shop still open at 5:02 PM, closing now...');
@@ -720,7 +639,17 @@ function scheduleAutoClose() {
     } else {
       console.log('⏰ 🛡️ SAFETY: Shop already closed at 5:02 PM');
     }
-  }, { scheduled: true, timezone: 'Asia/Manila' });
+  }, {
+    scheduled: true,
+    timezone: 'Asia/Manila'
+  });
+
+  console.log('✅ Enhanced auto-close scheduler started with 3 layers of protection');
+  console.log('🎯 MAIN: Exact 5:00 PM');
+  console.log('🔄 BACKUP: 4:59 PM - 5:01 PM (every minute)'); 
+  console.log('🛡️ SAFETY: 5:02 PM final check');
+
+  return { mainTask, backupTask, safetyTask };
 }
 
 // Manual trigger for testing auto-close
@@ -729,7 +658,7 @@ app.post('/trigger-auto-close', async (req, res) => {
     console.log('🔧 Manual auto-close trigger');
     console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
     await autoCloseShop();
-
+    
     res.status(200).json({
       success: true,
       message: 'Auto-close triggered manually',
@@ -749,7 +678,7 @@ app.get('/auto-close-logs', async (req, res) => {
       .orderBy('timestamp', 'desc')
       .limit(50)
       .get();
-
+    
     const logs = [];
     snapshot.forEach(doc => {
       logs.push({ id: doc.id, ...doc.data() });
@@ -775,7 +704,7 @@ app.get('/auto-close-logs', async (req, res) => {
 app.get('/shop-status', async (req, res) => {
   try {
     const shopDoc = await db.collection('shop_status').doc('current').get();
-
+    
     if (shopDoc.exists) {
       res.status(200).json({
         success: true,
@@ -809,7 +738,7 @@ app.get('/debug-tokens', async (req, res) => {
   try {
     const snapshot = await db.collection('fcm_tokens').get();
     const tokens = [];
-
+    
     snapshot.forEach(doc => {
       const data = doc.data();
       tokens.push({
@@ -834,9 +763,9 @@ app.get('/debug-tokens', async (req, res) => {
   }
 });
 
-// Health check
+// Health check with auto-close info
 app.get('/', (req, res) => {
-  res.status(200).json({
+  res.status(200).json({ 
     status: 'Server running',
     uniqueUsers: userTokens.size,
     timestamp: new Date().toISOString(),
@@ -844,36 +773,45 @@ app.get('/', (req, res) => {
     philippineHour: getCurrentPhilippineHour(),
     port: process.env.PORT,
     features: {
-      groupChatNotifications: true,
+      expandableNotifications: true,
+      enhancedMessages: true,
       tokenValidation: true,
       autoClose: true,
-      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
+      autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)',
+      customIcon: true,
+      iconPath: 'assets/icons/logo.png',
+      platforms: 'Android & iOS',
+      description: 'Auto-close runs automatically even when app is closed'
     }
   });
 });
 
 // Start server - Use Render's port
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log('📱 Notification service ready');
   console.log(`👥 Unique users (memory): ${userTokens.size}`);
+  console.log('✨ Features: Expandable Notifications, Enhanced Messages, Token Validation');
+  console.log('🎨 Custom Icon: logo.png (Android) & iOS (app icon)');
+  console.log('🎯 Color Scheme: Logo only - No green/red colors');
   console.log('⏰ Auto-close: Scheduled for 5PM Philippine Time daily (17:00 Asia/Manila)');
   console.log(`🕔 Current PH Time: ${getPhilippineTime()}`);
-  console.log(`🌍 Timezone: Asia/Manila (UTC+8)`);
-
-  await syncTokens();
+  console.log(`🕔 Current PH Hour: ${getCurrentPhilippineHour()}`);
+  console.log('🌍 Timezone: Asia/Manila (UTC+8)');
+  
+  // Sync tokens on startup
+  syncTokens();
+  
+  // Start auto-close scheduler
   scheduleAutoClose();
-
-  // ✅ START GROUP CHAT LISTENER
-  listenGroupChatNotifications();
 });
 
 // Sync tokens from Firestore on startup
 async function syncTokens() {
   try {
     const snapshot = await db.collection('fcm_tokens').get();
-
+    
     userTokens.clear();
     snapshot.forEach(doc => {
       const data = doc.data();
@@ -887,8 +825,14 @@ async function syncTokens() {
         });
       }
     });
-
+    
     console.log(`✅ Synced ${userTokens.size} unique users from Firestore`);
+    
+    // Validate all tokens
+    const allTokens = Array.from(userTokens.values()).map(u => u.token);
+    const validTokens = validateTokens(allTokens);
+    console.log(`🔍 Token validation: ${validTokens.length}/${allTokens.length} valid tokens`);
+    
   } catch (error) {
     console.error('❌ Sync error:', error);
   }
@@ -904,3 +848,4 @@ process.on('SIGINT', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
 });
+
