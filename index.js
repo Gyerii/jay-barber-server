@@ -134,7 +134,7 @@ async function getUserDisplayNameById(userId) {
   }
 }
 
-// ✅ Role-based filtering rule (YOUR REQUEST):
+// ✅ Role-based filtering rule (GROUP CHAT):
 // - always skip senderId
 // - if senderRole is admin => skip all admin recipients
 // - if senderRole is super_admin => skip all super_admin recipients
@@ -251,32 +251,69 @@ async function claimBookingRequestLock(bookingRef) {
 }
 
 // =========================
-// ✅ Send BOOKING notification ONLY to booking owner
-// ✅ FIXED: cancelled routing
-// - if cancelled by USER -> do NOT notify owner here (admins only)
-// - if cancelled by ADMIN -> notify owner
+// ✅ NEW: BOOKING NOTIFICATION ROUTING (YOUR RULES)
+// =========================
+// RULES you requested:
+// 1) NO notification when USER (owner) clicks confirm/approve/cancel on their own booking.
+// 2) ONLY notify owner/user IF admin/owner (staff) confirms/approved/declines.
+// 3) For cancelled:
+//    - cancelled by USER => notify admins only (optional; kept as existing feature)
+//    - cancelled by ADMIN => notify owner/user
+//
+// Implementation:
+// - We inspect bookingData.updatedBy / updatedByRole (or actionBy / actionByRole).
+// - We skip owner notification if actor is the owner userId.
+// - We ONLY send owner notification if actorRole is admin/super_admin AND status is approved/confirmed/declined/cancelled(completed/etc).
+//
+function _getActorFromBooking(bookingData) {
+  const d = bookingData || {};
+  const actorId =
+    (d.updatedBy || d.actionBy || d.modifiedBy || d.lastUpdatedBy || '').toString();
+  const actorRole =
+    (d.updatedByRole || d.actionByRole || d.modifiedByRole || d.lastUpdatedByRole || '').toString().toLowerCase();
+
+  return { actorId, actorRole };
+}
+
+function _isAdminRole(role) {
+  const r = (role || '').toString().toLowerCase();
+  return r === 'admin' || r === 'super_admin';
+}
+
+// =========================
+// ✅ Send BOOKING notification ONLY to booking owner (when allowed by rules)
 // =========================
 async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData }) {
   try {
     if (!userId || !status || !bookingId) return;
 
-    // ✅ no notification for pending
+    // never notify owner for pending
     if (status === 'pending') return;
 
-    // ✅ FIX: If cancelled by user/unknown => skip owner notification
+    const { actorId, actorRole } = _getActorFromBooking(bookingData);
+
+    // ✅ RULE: if owner did the action => NO notify owner
+    if (actorId && actorId === userId) {
+      console.log(`ℹ️ Booking ${bookingId} updated by owner (${userId}). Skipping owner notification.`);
+      return;
+    }
+
+    // ✅ RULE: owner notification should come from admin/super_admin ONLY for key statuses
+    const notifyOwnerStatuses = new Set(['approved', 'confirmed', 'declined', 'cancelled', 'completed', 'passed']);
+    if (!notifyOwnerStatuses.has(status)) return;
+
+    // For approved/confirmed/declined/completed/passed -> must be admin action
+    // For cancelled: only notify owner if admin cancelled
     if (status === 'cancelled') {
-      const cancelledBy = (bookingData?.cancelledBy || '').toString().toLowerCase();
-      const cancelledByRole = (bookingData?.cancelledByRole || '').toString().toLowerCase();
-
-      const cancelledByAdmin =
-        cancelledBy === 'admin' ||
-        cancelledBy === 'super_admin' ||
-        cancelledByRole === 'admin' ||
-        cancelledByRole === 'super_admin';
-
-      // If user cancelled (or field missing/unknown) -> DO NOT notify owner
-      if (!cancelledByAdmin) {
-        console.log(`ℹ️ Booking ${bookingId} cancelled by user/unknown. Skipping owner notification.`);
+      // allow admin cancellation only
+      if (!_isAdminRole(actorRole)) {
+        console.log(`ℹ️ Booking ${bookingId} cancelled by non-admin (${actorRole || 'unknown'}). Skipping owner notification.`);
+        return;
+      }
+    } else {
+      // approved/confirmed/declined/completed/passed -> only admin may notify owner
+      if (!_isAdminRole(actorRole)) {
+        console.log(`ℹ️ Booking ${bookingId} status=${status} updated by non-admin (${actorRole || 'unknown'}). Skipping owner notification.`);
         return;
       }
     }
@@ -336,6 +373,9 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
         bookingId: bookingId.toString(),
         userId: userId.toString(),
         status: status.toString(),
+        // include actor so client can also guard if needed
+        actorId: (actorId || '').toString(),
+        actorRole: (actorRole || '').toString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
         timestamp: new Date().toISOString()
       },
@@ -409,8 +449,8 @@ function formatBookingDate(dateVal) {
 }
 
 // =========================
-// ✅ FIXED: Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
-// ✅ IMPORTANT FIX: EXCLUDE the booking owner so they DO NOT notify themselves
+// ✅ Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
+// ✅ EXCLUDE booking owner so they DO NOT notify themselves
 // =========================
 async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
   try {
@@ -444,7 +484,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
       // only admins
       if (!(role === 'admin' || role === 'super_admin')) return;
 
-      // ✅ EXCLUDE booking owner (even if admin)
+      // exclude booking owner (even if admin)
       if (userId && recipientUserId === userId) return;
 
       tokens.push(token);
@@ -522,7 +562,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
 }
 
 // =========================
-// ✅ NEW: USER CANCELLED booking => notify ADMINS only (not owner, not other users)
+// ✅ USER CANCELLED booking => notify ADMINS only (not owner, not other users)
 // =========================
 async function sendUserCancelledBookingToAdmins({ bookingId, bookingData }) {
   try {
@@ -628,10 +668,7 @@ async function sendUserCancelledBookingToAdmins({ bookingId, bookingData }) {
 }
 
 // =========================
-// ✅ Listen booking status changes and notify:
-// - approved/declined/etc => ONLY owner
-// - cancelled by user/unknown => ONLY admins
-// - cancelled by admin => ONLY owner
+// ✅ Listen booking status changes and route notifications per rules
 // =========================
 function listenBookingStatusNotifications() {
   console.log('👂 Listening to Firestore bookings for status changes...');
@@ -649,7 +686,7 @@ function listenBookingStatusNotifications() {
           const bookingId = doc.id;
 
           const userId = (data.userId || '').toString();
-          const status = (data.status || 'pending').toString();
+          const status = (data.status || 'pending').toString().toLowerCase();
 
           if (!status || status === 'pending') continue;
 
@@ -659,34 +696,25 @@ function listenBookingStatusNotifications() {
           const claimed = await claimBookingStatusLock(doc.ref, status);
           if (!claimed) continue;
 
-          // ✅ FIX: Cancelled by user => notify admins only
+          const { actorId, actorRole } = _getActorFromBooking(data);
+          const actorIsAdmin = _isAdminRole(actorRole);
+
+          // ✅ Cancelled routing:
+          // - cancelled by USER/unknown => notify admins only
+          // - cancelled by ADMIN => notify owner (and not admins)
           if (status === 'cancelled') {
-            const cancelledBy = (data.cancelledBy || '').toString().toLowerCase();
-            const cancelledByRole = (data.cancelledByRole || '').toString().toLowerCase();
-
-            const cancelledByAdmin =
-              cancelledBy === 'admin' ||
-              cancelledBy === 'super_admin' ||
-              cancelledByRole === 'admin' ||
-              cancelledByRole === 'super_admin';
-
-            // If user cancelled (or unknown/missing) -> admins only
-            if (!cancelledByAdmin) {
-              await sendUserCancelledBookingToAdmins({
-                bookingId,
-                bookingData: data
-              });
-              continue; // do not notify owner
+            if (!actorIsAdmin) {
+              await sendUserCancelledBookingToAdmins({ bookingId, bookingData: data });
+              continue;
             }
+            // if admin cancelled -> owner only (sendBookingStatusToOwner handles admin rule)
+            await sendBookingStatusToOwner({ bookingId, userId, status, bookingData: data });
+            continue;
           }
 
-          // ✅ default: notify owner only
-          await sendBookingStatusToOwner({
-            bookingId,
-            userId,
-            status,
-            bookingData: data
-          });
+          // ✅ Approved/Confirmed/Declined/etc:
+          // Only notify owner if admin did the action (sendBookingStatusToOwner enforces)
+          await sendBookingStatusToOwner({ bookingId, userId, status, bookingData: data });
         }
       } catch (e) {
         console.error('❌ bookings listener error:', e);
@@ -1372,8 +1400,9 @@ app.get('/', (req, res) => {
       roleBasedGroupChatFiltering: true,
       noDuplicateNotifications: true,
       bookingStatusNotifications: true,
+      bookingStatusOwnerNotifiedOnlyByAdmin: true, // ✅ NEW RULE
       bookingRequestNotificationsToAdmins: true,
-      userCancelledBookingNotifiesAdminsOnly: true, // ✅ FIXED
+      userCancelledBookingNotifiesAdminsOnly: true,
       tokenValidation: true,
       autoClose: true,
       autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
