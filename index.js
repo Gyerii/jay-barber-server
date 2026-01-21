@@ -66,6 +66,11 @@ function validateTokens(tokens) {
   return validTokens;
 }
 
+// ✅ NEW: always dedupe tokens BEFORE validate + send
+function dedupeTokens(tokens) {
+  return Array.from(new Set((tokens || []).filter(Boolean)));
+}
+
 function chunkArray(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -114,7 +119,6 @@ async function getUserDisplayNameById(userId) {
     if (!doc.exists) return 'Unknown user';
 
     const d = doc.data() || {};
-    // Try common field names safely:
     const fullName = (d.fullName || d.name || d.displayName || '').toString().trim();
     if (fullName) return fullName;
 
@@ -133,17 +137,12 @@ async function getUserDisplayNameById(userId) {
   }
 }
 
-// ✅ Role-based filtering rule (YOUR REQUEST):
-// - always skip senderId
-// - if senderRole is admin => skip all admin recipients
-// - if senderRole is super_admin => skip all super_admin recipients
+// ✅ Role-based filtering rule
 function shouldSkipRecipient({ senderId, senderRole, recipientUserId, recipientRole }) {
   if (!recipientUserId) return true;
 
-  // Always skip sender
   if (senderId && recipientUserId === senderId) return true;
 
-  // Staff group suppression:
   if (senderRole === 'admin' && recipientRole === 'admin') return true;
   if (senderRole === 'super_admin' && recipientRole === 'super_admin') return true;
 
@@ -172,7 +171,6 @@ async function claimNotificationLock(docRef) {
       const data = snap.data() || {};
       if (data.notified === true) return false;
 
-      // claim lock
       t.set(docRef, {
         notified: true,
         notifiedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -201,10 +199,8 @@ async function claimBookingStatusLock(bookingRef, status) {
       const data = snap.data() || {};
       const already = (data.bookingNotifiedStatus || '').toString();
 
-      // ✅ already notified for this exact status
       if (already === status) return false;
 
-      // ✅ set lock
       t.set(bookingRef, {
         bookingNotifiedStatus: status,
         bookingNotifiedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -256,10 +252,8 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
   try {
     if (!userId || !status || !bookingId) return;
 
-    // ✅ no notification for pending
     if (status === 'pending') return;
 
-    // ✅ read token for that user only
     const tokenDoc = await db.collection('fcm_tokens').doc(userId).get();
     if (!tokenDoc.exists) {
       console.log(`⚠️ No token found for booking owner: ${userId}`);
@@ -295,6 +289,8 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
       body = 'Your booking schedule has passed.';
     }
 
+    const dedupeKey = `booking_${bookingId}_${status}`;
+
     const payload = {
       notification: { title, body },
       android: {
@@ -304,20 +300,21 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
           sound: 'default',
           priority: 'max',
           icon: 'logo',
-          tag: `booking_${bookingId}_${status}`,
+          tag: dedupeKey,
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
         }
       },
       apns: { payload: { aps: { sound: 'default' } } },
       data: {
         type: 'booking_status',
+        dedupeKey,
         bookingId: bookingId.toString(),
         userId: userId.toString(),
         status: status.toString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
         timestamp: new Date().toISOString()
       },
-      token: token
+      token
     };
 
     const resp = await admin.messaging().send(payload);
@@ -330,8 +327,6 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
 // =========================
 // ✅ NEW: helpers for admin booking request format (BOLD NAME + DATE ONLY)
 // =========================
-
-// Convert normal text to Unicode bold (works in notifications)
 function toBoldUnicode(text) {
   const str = (text || '').toString();
   const map = {
@@ -342,12 +337,10 @@ function toBoldUnicode(text) {
   return str.split('').map(ch => map[ch] || ch).join('');
 }
 
-// Format booking date into MM/DD/YYYY (no time)
 function formatBookingDate(dateVal) {
   try {
     let d = null;
 
-    // Firestore Timestamp
     if (dateVal && typeof dateVal === 'object' && typeof dateVal.toDate === 'function') {
       d = dateVal.toDate();
     } else if (dateVal instanceof Date) {
@@ -355,7 +348,6 @@ function formatBookingDate(dateVal) {
     } else if (typeof dateVal === 'string') {
       const s = dateVal.trim();
 
-      // already mm/dd/yyyy
       if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)) {
         const parts = s.split('/');
         const mm = String(parseInt(parts[0], 10)).padStart(2, '0');
@@ -364,13 +356,11 @@ function formatBookingDate(dateVal) {
         return `${mm}/${dd}/${yyyy}`;
       }
 
-      // yyyy-mm-dd
       if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
         const [yyyy, mm, dd] = s.split('-');
         return `${mm}/${dd}/${yyyy}`;
       }
 
-      // try parseable date string
       const parsed = new Date(s);
       if (!isNaN(parsed.getTime())) d = parsed;
     }
@@ -387,28 +377,22 @@ function formatBookingDate(dateVal) {
 }
 
 // =========================
-// ✅ NEW: Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
-// ✅ Body format: 𝗝𝗼𝗵𝗻 𝗗𝗼𝗲 • Fade Cut • 01/16/2026
-// ✅ No images, no time
+// ✅ Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
+// ✅ FIXED: token dedupe to prevent duplicates
 // =========================
 async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
   try {
     const userId = (bookingData?.userId || '').toString();
     const userName = await getUserDisplayNameById(userId);
 
-    // Haircut name
     const haircutName = (bookingData?.haircutName || bookingData?.serviceName || 'Booking').toString().trim();
 
-    // Date only
     const dateVal = bookingData?.date || bookingData?.day || bookingData?.bookingDate;
     const formattedDate = formatBookingDate(dateVal) || 'Unknown date';
 
     const title = 'New Booking Request';
-
-    // ✅ Bold ONLY user name
     const body = `${toBoldUnicode(userName)} • ${haircutName} • ${formattedDate}`;
 
-    // collect admin tokens
     const snap = await db.collection('fcm_tokens').get();
     const tokens = [];
 
@@ -416,22 +400,24 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
       const d = doc.data() || {};
       const role = (d.role || 'user').toString();
       const token = (d.token || '').toString();
-
       if (!token || token.length < 100) return;
       if (role === 'admin' || role === 'super_admin') tokens.push(token);
     });
 
-    const validTokens = validateTokens(tokens);
+    const uniqueTokens = dedupeTokens(tokens);
+    const validTokens = validateTokens(uniqueTokens);
+
     if (validTokens.length === 0) {
       console.log('⚠️ No admin tokens found for new booking request');
       return { successCount: 0, failureCount: 0 };
     }
 
-    // Multicast limit 500
     const chunks = chunkArray(validTokens, 500);
 
     let totalSuccess = 0;
     let totalFailure = 0;
+
+    const dedupeKey = `booking_request_${bookingId}`;
 
     for (const chunk of chunks) {
       const payload = {
@@ -442,15 +428,15 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
             channelId: 'booking_channel',
             sound: 'default',
             priority: 'max',
-            // ✅ keep your icon as-is (Android will still show app icon anyway)
             icon: 'logo',
-            tag: `booking_request_${bookingId}`,
+            tag: dedupeKey,
             clickAction: 'FLUTTER_NOTIFICATION_CLICK',
           }
         },
         apns: { payload: { aps: { sound: 'default' } } },
         data: {
           type: 'booking_request',
+          dedupeKey,
           bookingId: (bookingId || '').toString(),
           userId: (userId || '').toString(),
           userName: (userName || '').toString(),
@@ -538,7 +524,7 @@ function listenBookingStatusNotifications() {
 }
 
 // =========================
-// ✅ NEW: Listen NEW bookings and notify ADMINS on "added"
+// ✅ Listen NEW bookings and notify ADMINS on "added"
 // =========================
 function listenNewBookingRequestNotifications() {
   console.log('👂 Listening to Firestore bookings for NEW booking requests (notify admin)...');
@@ -550,7 +536,6 @@ function listenNewBookingRequestNotifications() {
     .limit(50)
     .onSnapshot(async (snapshot) => {
       try {
-        // ignore initial load so it doesn't spam admins
         if (firstSnapshot) {
           firstSnapshot = false;
           console.log('👂 New booking listener ready (initial snapshot ignored)');
@@ -564,7 +549,6 @@ function listenNewBookingRequestNotifications() {
           const data = doc.data() || {};
           const bookingId = doc.id;
 
-          // only notify admin for pending/new requests
           const status = (data.status || 'pending').toString();
           if (status !== 'pending') continue;
 
@@ -625,7 +609,6 @@ app.post('/store-token', async (req, res) => {
   }
 });
 
-// Remove token
 app.post('/remove-token', async (req, res) => {
   try {
     const { token, userId } = req.body;
@@ -653,7 +636,6 @@ app.post('/remove-token', async (req, res) => {
   }
 });
 
-// Get user count
 app.get('/token-count', async (req, res) => {
   try {
     const snapshot = await db.collection('fcm_tokens').get();
@@ -687,7 +669,7 @@ app.get('/token-count', async (req, res) => {
 });
 
 // =========================
-// ✅ SEND TO UNIQUE USERS
+// ✅ SEND TO UNIQUE USERS (FIXED DEDUPE)
 // =========================
 app.post('/send-to-unique-users', async (req, res) => {
   try {
@@ -700,7 +682,7 @@ app.post('/send-to-unique-users', async (req, res) => {
     let uniqueTokens = [];
 
     if (tokens && Array.isArray(tokens)) {
-      uniqueTokens = [...new Set(tokens)];
+      uniqueTokens = dedupeTokens(tokens);
     } else {
       const snapshot = await db.collection('fcm_tokens').get();
       const tokenSet = new Set();
@@ -725,6 +707,8 @@ app.post('/send-to-unique-users', async (req, res) => {
 
     console.log(`📤 Sending to ${uniqueTokens.length} valid users...`);
 
+    const dedupeKey = `general_${Date.now()}`;
+
     const message = {
       notification: { title, body },
       android: {
@@ -733,7 +717,7 @@ app.post('/send-to-unique-users', async (req, res) => {
           channelId: 'shop_status_channel',
           sound: 'default',
           priority: 'max',
-          tag: 'shop_status',
+          tag: dedupeKey,
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
           icon: 'logo'
         }
@@ -741,6 +725,7 @@ app.post('/send-to-unique-users', async (req, res) => {
       apns: { payload: { aps: { sound: 'default', badge: 1 } } },
       data: {
         type: 'general_notification',
+        dedupeKey,
         timestamp: new Date().toISOString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK'
       },
@@ -782,7 +767,7 @@ app.post('/send-to-unique-users', async (req, res) => {
 });
 
 // =========================
-// ✅ SHOP STATUS NOTIFICATION
+// ✅ SHOP STATUS NOTIFICATION (FIXED DEDUPE)
 // =========================
 app.post('/send-shop-status', async (req, res) => {
   try {
@@ -804,7 +789,7 @@ app.post('/send-shop-status', async (req, res) => {
       }
     });
 
-    const validTokens = validateTokens(tokens);
+    const validTokens = validateTokens(dedupeTokens(tokens));
 
     if (validTokens.length === 0) {
       return res.status(200).json({
@@ -820,6 +805,8 @@ app.post('/send-shop-status', async (req, res) => {
       ? 'Great news! We are now open and ready to serve you with fresh haircuts and styling services. Come visit us for your grooming needs!'
       : 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon!';
 
+    const dedupeKey = `shop_status_${isOpen ? 'open' : 'closed'}_${new Date().toISOString().slice(0, 10)}`;
+
     console.log(`📤 Sending shop ${isOpen ? 'OPEN' : 'CLOSED'} to ${validTokens.length} valid users`);
 
     const message = {
@@ -830,7 +817,7 @@ app.post('/send-shop-status', async (req, res) => {
           channelId: 'shop_status_channel',
           sound: 'default',
           priority: 'max',
-          tag: 'shop_status',
+          tag: dedupeKey,
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
           icon: 'logo'
         }
@@ -838,6 +825,7 @@ app.post('/send-shop-status', async (req, res) => {
       apns: { payload: { aps: { sound: 'default', badge: 1 } } },
       data: {
         type: 'shop_status',
+        dedupeKey,
         status: isOpen ? 'open' : 'closed',
         timestamp: new Date().toISOString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
@@ -891,7 +879,7 @@ app.post('/send-shop-status', async (req, res) => {
 });
 
 // =========================
-// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED + NO DUPLICATES)
+// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED + FIXED DEDUPE)
 // =========================
 async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, senderName, messageType, message }) {
   const senderRole = await getUserRoleById(senderId);
@@ -903,9 +891,9 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
     const data = doc.data() || {};
     const recipientUserId = (data.userId || doc.id || '').toString();
     const recipientRole = (data.role || 'user').toString();
-    const token = data.token;
+    const token = (data.token || '').toString();
 
-    if (!token || typeof token !== 'string') return;
+    if (!token || token.length < 100) return;
 
     if (shouldSkipRecipient({
       senderId,
@@ -917,7 +905,7 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
     tokens.push(token);
   });
 
-  const validTokens = validateTokens(tokens);
+  const validTokens = validateTokens(dedupeTokens(tokens));
   if (validTokens.length === 0) {
     console.log('⚠️ No valid recipients after role filtering (group chat).');
     return { successCount: 0, failureCount: 0 };
@@ -935,6 +923,8 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
   let totalSuccess = 0;
   let totalFailure = 0;
 
+  const dedupeKey = chatDocId ? `group_chat_${chatDocId}` : `group_chat_${Date.now()}`;
+
   for (const chunk of chunks) {
     const payload = {
       notification: { title, body },
@@ -946,12 +936,13 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
           priority: 'max',
           clickAction: 'FLUTTER_NOTIFICATION_CLICK',
           icon: 'logo',
-          tag: chatDocId ? `group_chat_${chatDocId}` : 'group_chat'
+          tag: dedupeKey
         }
       },
       apns: { payload: { aps: { sound: 'default' } } },
       data: {
         type: 'group_chat',
+        dedupeKey,
         chatDocId: (chatDocId || '').toString(),
         senderId: (senderId || '').toString(),
         senderName: (senderName || '').toString(),
@@ -1039,7 +1030,7 @@ function listenGroupChatNotifications() {
 }
 
 // =========================
-// AUTO-CLOSE SHOP (your full logic)
+// AUTO-CLOSE SHOP (your full logic) - uses shop dedupe too
 // =========================
 async function autoCloseShop() {
   try {
@@ -1060,22 +1051,20 @@ async function autoCloseShop() {
       }, { merge: true });
 
       const snapshot = await db.collection('fcm_tokens').get();
-      const uniqueTokens = [];
-      const userIds = [];
+      const tokens = [];
 
       snapshot.forEach(doc => {
         const data = doc.data();
-        if (data.token && data.userId) {
-          uniqueTokens.push(data.token);
-          userIds.push(data.userId);
-        }
+        if (data.token) tokens.push(data.token);
       });
 
-      const validTokens = validateTokens(uniqueTokens);
+      const validTokens = validateTokens(dedupeTokens(tokens));
 
       if (validTokens.length > 0) {
         const title = 'Shop is Now CLOSED';
         const body = 'Thank you for your visit today! We are now closed and will reopen tomorrow with fresh energy and great service. See you soon!';
+
+        const dedupeKey = `shop_status_closed_${new Date().toISOString().slice(0, 10)}_auto`;
 
         console.log(`📤 Auto-close: Sending notification to ${validTokens.length} users`);
 
@@ -1087,7 +1076,7 @@ async function autoCloseShop() {
               channelId: 'shop_status_channel',
               sound: 'default',
               priority: 'max',
-              tag: 'shop_status',
+              tag: dedupeKey,
               clickAction: 'FLUTTER_NOTIFICATION_CLICK',
               icon: 'logo'
             }
@@ -1095,6 +1084,7 @@ async function autoCloseShop() {
           apns: { payload: { aps: { sound: 'default', badge: 1 } } },
           data: {
             type: 'shop_status',
+            dedupeKey,
             status: 'closed',
             auto_closed: 'true',
             timestamp: new Date().toISOString(),
@@ -1179,7 +1169,6 @@ function scheduleAutoClose() {
   }, { scheduled: true, timezone: 'Asia/Manila' });
 }
 
-// Manual trigger
 app.post('/trigger-auto-close', async (req, res) => {
   try {
     console.log('🔧 Manual auto-close trigger');
@@ -1198,7 +1187,6 @@ app.post('/trigger-auto-close', async (req, res) => {
   }
 });
 
-// Health check
 app.get('/', (req, res) => {
   res.status(200).json({
     status: 'Server running',
@@ -1212,7 +1200,7 @@ app.get('/', (req, res) => {
       roleBasedGroupChatFiltering: true,
       noDuplicateNotifications: true,
       bookingStatusNotifications: true,
-      bookingRequestNotificationsToAdmins: true, // ✅ NEW
+      bookingRequestNotificationsToAdmins: true,
       tokenValidation: true,
       autoClose: true,
       autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
@@ -1233,17 +1221,11 @@ app.listen(PORT, async () => {
   await syncTokens();
   scheduleAutoClose();
 
-  // ✅ START GROUP CHAT LISTENER
   listenGroupChatNotifications();
-
-  // ✅ START BOOKING STATUS LISTENER
   listenBookingStatusNotifications();
-
-  // ✅ NEW: START NEW BOOKING REQUEST LISTENER (notify admin)
   listenNewBookingRequestNotifications();
 });
 
-// Sync tokens from Firestore on startup
 async function syncTokens() {
   try {
     const snapshot = await db.collection('fcm_tokens').get();
@@ -1268,7 +1250,6 @@ async function syncTokens() {
   }
 }
 
-// Handle graceful shutdown
 process.on('SIGTERM', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
@@ -1278,4 +1259,3 @@ process.on('SIGINT', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
 });
-
