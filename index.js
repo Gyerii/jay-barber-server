@@ -1,4 +1,3 @@
-// index.js
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
@@ -134,7 +133,7 @@ async function getUserDisplayNameById(userId) {
   }
 }
 
-// ✅ Role-based filtering rule (GROUP CHAT):
+// ✅ Role-based filtering rule (YOUR REQUEST):
 // - always skip senderId
 // - if senderRole is admin => skip all admin recipients
 // - if senderRole is super_admin => skip all super_admin recipients
@@ -251,72 +250,14 @@ async function claimBookingRequestLock(bookingRef) {
 }
 
 // =========================
-// ✅ NEW: BOOKING NOTIFICATION ROUTING (YOUR RULES)
-// =========================
-// RULES you requested:
-// 1) NO notification when USER (owner) clicks confirm/approve/cancel on their own booking.
-// 2) ONLY notify owner/user IF admin/owner (staff) confirms/approved/declines.
-// 3) For cancelled:
-//    - cancelled by USER => notify admins only (optional; kept as existing feature)
-//    - cancelled by ADMIN => notify owner/user
-//
-// Implementation:
-// - We inspect bookingData.updatedBy / updatedByRole (or actionBy / actionByRole).
-// - We skip owner notification if actor is the owner userId.
-// - We ONLY send owner notification if actorRole is admin/super_admin AND status is approved/confirmed/declined/cancelled(completed/etc).
-//
-function _getActorFromBooking(bookingData) {
-  const d = bookingData || {};
-  const actorId =
-    (d.updatedBy || d.actionBy || d.modifiedBy || d.lastUpdatedBy || '').toString();
-  const actorRole =
-    (d.updatedByRole || d.actionByRole || d.modifiedByRole || d.lastUpdatedByRole || '').toString().toLowerCase();
-
-  return { actorId, actorRole };
-}
-
-function _isAdminRole(role) {
-  const r = (role || '').toString().toLowerCase();
-  return r === 'admin' || r === 'super_admin';
-}
-
-// =========================
-// ✅ Send BOOKING notification ONLY to booking owner (when allowed by rules)
+// ✅ Send BOOKING notification ONLY to booking owner
 // =========================
 async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData }) {
   try {
     if (!userId || !status || !bookingId) return;
 
-    // never notify owner for pending
+    // ✅ no notification for pending
     if (status === 'pending') return;
-
-    const { actorId, actorRole } = _getActorFromBooking(bookingData);
-
-    // ✅ RULE: if owner did the action => NO notify owner
-    if (actorId && actorId === userId) {
-      console.log(`ℹ️ Booking ${bookingId} updated by owner (${userId}). Skipping owner notification.`);
-      return;
-    }
-
-    // ✅ RULE: owner notification should come from admin/super_admin ONLY for key statuses
-    const notifyOwnerStatuses = new Set(['approved', 'confirmed', 'declined', 'cancelled', 'completed', 'passed']);
-    if (!notifyOwnerStatuses.has(status)) return;
-
-    // For approved/confirmed/declined/completed/passed -> must be admin action
-    // For cancelled: only notify owner if admin cancelled
-    if (status === 'cancelled') {
-      // allow admin cancellation only
-      if (!_isAdminRole(actorRole)) {
-        console.log(`ℹ️ Booking ${bookingId} cancelled by non-admin (${actorRole || 'unknown'}). Skipping owner notification.`);
-        return;
-      }
-    } else {
-      // approved/confirmed/declined/completed/passed -> only admin may notify owner
-      if (!_isAdminRole(actorRole)) {
-        console.log(`ℹ️ Booking ${bookingId} status=${status} updated by non-admin (${actorRole || 'unknown'}). Skipping owner notification.`);
-        return;
-      }
-    }
 
     // ✅ read token for that user only
     const tokenDoc = await db.collection('fcm_tokens').doc(userId).get();
@@ -345,7 +286,7 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
       body = 'Sorry, your booking was declined. You can book another schedule.';
     } else if (status === 'cancelled') {
       title = 'Booking Cancelled';
-      body = 'Your booking was cancelled by the admin.';
+      body = 'Your booking was cancelled.';
     } else if (status === 'completed') {
       title = 'Booking Completed';
       body = 'Your booking is completed. Thank you!';
@@ -373,9 +314,6 @@ async function sendBookingStatusToOwner({ bookingId, userId, status, bookingData
         bookingId: bookingId.toString(),
         userId: userId.toString(),
         status: status.toString(),
-        // include actor so client can also guard if needed
-        actorId: (actorId || '').toString(),
-        actorRole: (actorRole || '').toString(),
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
         timestamp: new Date().toISOString()
       },
@@ -449,8 +387,9 @@ function formatBookingDate(dateVal) {
 }
 
 // =========================
-// ✅ Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
-// ✅ EXCLUDE booking owner so they DO NOT notify themselves
+// ✅ NEW: Send NEW BOOKING REQUEST notification to ALL ADMIN + SUPER_ADMIN
+// ✅ Body format: 𝗝𝗼𝗵𝗻 𝗗𝗼𝗲 • Fade Cut • 01/16/2026
+// ✅ No images, no time
 // =========================
 async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
   try {
@@ -469,7 +408,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
     // ✅ Bold ONLY user name
     const body = `${toBoldUnicode(userName)} • ${haircutName} • ${formattedDate}`;
 
-    // collect admin tokens (excluding booking owner)
+    // collect admin tokens
     const snap = await db.collection('fcm_tokens').get();
     const tokens = [];
 
@@ -477,17 +416,9 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
       const d = doc.data() || {};
       const role = (d.role || 'user').toString();
       const token = (d.token || '').toString();
-      const recipientUserId = (d.userId || doc.id || '').toString();
 
       if (!token || token.length < 100) return;
-
-      // only admins
-      if (!(role === 'admin' || role === 'super_admin')) return;
-
-      // exclude booking owner (even if admin)
-      if (userId && recipientUserId === userId) return;
-
-      tokens.push(token);
+      if (role === 'admin' || role === 'super_admin') tokens.push(token);
     });
 
     const validTokens = validateTokens(tokens);
@@ -511,6 +442,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
             channelId: 'booking_channel',
             sound: 'default',
             priority: 'max',
+            // ✅ keep your icon as-is (Android will still show app icon anyway)
             icon: 'logo',
             tag: `booking_request_${bookingId}`,
             clickAction: 'FLUTTER_NOTIFICATION_CLICK',
@@ -562,113 +494,7 @@ async function sendNewBookingRequestToAdmins({ bookingId, bookingData }) {
 }
 
 // =========================
-// ✅ USER CANCELLED booking => notify ADMINS only (not owner, not other users)
-// =========================
-async function sendUserCancelledBookingToAdmins({ bookingId, bookingData }) {
-  try {
-    const userId = (bookingData?.userId || '').toString();
-    const userName = await getUserDisplayNameById(userId);
-
-    const haircutName = (bookingData?.haircutName || bookingData?.serviceName || 'Booking').toString().trim();
-
-    const dateVal = bookingData?.date || bookingData?.day || bookingData?.bookingDate;
-    const formattedDate = formatBookingDate(dateVal) || 'Unknown date';
-
-    const title = 'Booking Cancelled';
-    const body = `${toBoldUnicode(userName)} • ${haircutName} • ${formattedDate}`;
-
-    const snap = await db.collection('fcm_tokens').get();
-    const tokens = [];
-
-    snap.forEach(doc => {
-      const d = doc.data() || {};
-      const role = (d.role || 'user').toString();
-      const token = (d.token || '').toString();
-      const recipientUserId = (d.userId || doc.id || '').toString();
-
-      if (!token || token.length < 100) return;
-
-      // admins only
-      if (!(role === 'admin' || role === 'super_admin')) return;
-
-      // exclude canceller (covers edge-case: user is admin)
-      if (userId && recipientUserId === userId) return;
-
-      tokens.push(token);
-    });
-
-    const validTokens = validateTokens(tokens);
-    if (validTokens.length === 0) {
-      console.log('⚠️ No admin tokens found for user-cancelled booking');
-      return { successCount: 0, failureCount: 0 };
-    }
-
-    const chunks = chunkArray(validTokens, 500);
-
-    let totalSuccess = 0;
-    let totalFailure = 0;
-
-    for (const chunk of chunks) {
-      const payload = {
-        notification: { title, body },
-        android: {
-          priority: 'high',
-          notification: {
-            channelId: 'booking_channel',
-            sound: 'default',
-            priority: 'max',
-            icon: 'logo',
-            tag: `booking_cancelled_${bookingId}`,
-            clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-          }
-        },
-        apns: { payload: { aps: { sound: 'default' } } },
-        data: {
-          type: 'booking_cancelled',
-          bookingId: (bookingId || '').toString(),
-          userId: (userId || '').toString(),
-          userName: (userName || '').toString(),
-          haircutName: (haircutName || '').toString(),
-          date: (formattedDate || '').toString(),
-          click_action: 'FLUTTER_NOTIFICATION_CLICK',
-          timestamp: new Date().toISOString()
-        },
-        tokens: chunk
-      };
-
-      const resp = await admin.messaging().sendEachForMulticast(payload);
-      totalSuccess += resp.successCount;
-      totalFailure += resp.failureCount;
-
-      if (resp.failureCount > 0) {
-        const toRemove = [];
-        for (let i = 0; i < resp.responses.length; i++) {
-          const r = resp.responses[i];
-          if (!r.success) {
-            const code = r.error?.code;
-            if (
-              code === 'messaging/invalid-registration-token' ||
-              code === 'messaging/registration-token-not-registered' ||
-              code === 'messaging/invalid-argument'
-            ) {
-              toRemove.push(chunk[i]);
-            }
-          }
-        }
-        if (toRemove.length > 0) await cleanupInvalidTokensByList(toRemove);
-      }
-    }
-
-    console.log(`✅ User-cancelled booking notif sent to admins. Success=${totalSuccess}, Failed=${totalFailure}`);
-    return { successCount: totalSuccess, failureCount: totalFailure };
-  } catch (e) {
-    console.error('❌ sendUserCancelledBookingToAdmins error:', e);
-    return { successCount: 0, failureCount: 0 };
-  }
-}
-
-// =========================
-// ✅ Listen booking status changes and route notifications per rules
+// ✅ Listen booking status changes and notify ONLY owner
 // =========================
 function listenBookingStatusNotifications() {
   console.log('👂 Listening to Firestore bookings for status changes...');
@@ -686,7 +512,7 @@ function listenBookingStatusNotifications() {
           const bookingId = doc.id;
 
           const userId = (data.userId || '').toString();
-          const status = (data.status || 'pending').toString().toLowerCase();
+          const status = (data.status || 'pending').toString();
 
           if (!status || status === 'pending') continue;
 
@@ -696,25 +522,12 @@ function listenBookingStatusNotifications() {
           const claimed = await claimBookingStatusLock(doc.ref, status);
           if (!claimed) continue;
 
-          const { actorId, actorRole } = _getActorFromBooking(data);
-          const actorIsAdmin = _isAdminRole(actorRole);
-
-          // ✅ Cancelled routing:
-          // - cancelled by USER/unknown => notify admins only
-          // - cancelled by ADMIN => notify owner (and not admins)
-          if (status === 'cancelled') {
-            if (!actorIsAdmin) {
-              await sendUserCancelledBookingToAdmins({ bookingId, bookingData: data });
-              continue;
-            }
-            // if admin cancelled -> owner only (sendBookingStatusToOwner handles admin rule)
-            await sendBookingStatusToOwner({ bookingId, userId, status, bookingData: data });
-            continue;
-          }
-
-          // ✅ Approved/Confirmed/Declined/etc:
-          // Only notify owner if admin did the action (sendBookingStatusToOwner enforces)
-          await sendBookingStatusToOwner({ bookingId, userId, status, bookingData: data });
+          await sendBookingStatusToOwner({
+            bookingId,
+            userId,
+            status,
+            bookingData: data
+          });
         }
       } catch (e) {
         console.error('❌ bookings listener error:', e);
@@ -725,8 +538,7 @@ function listenBookingStatusNotifications() {
 }
 
 // =========================
-// ✅ Listen NEW bookings and notify ADMINS on "added"
-// (still only for pending)
+// ✅ NEW: Listen NEW bookings and notify ADMINS on "added"
 // =========================
 function listenNewBookingRequestNotifications() {
   console.log('👂 Listening to Firestore bookings for NEW booking requests (notify admin)...');
@@ -1400,9 +1212,7 @@ app.get('/', (req, res) => {
       roleBasedGroupChatFiltering: true,
       noDuplicateNotifications: true,
       bookingStatusNotifications: true,
-      bookingStatusOwnerNotifiedOnlyByAdmin: true, // ✅ NEW RULE
-      bookingRequestNotificationsToAdmins: true,
-      userCancelledBookingNotifiesAdminsOnly: true,
+      bookingRequestNotificationsToAdmins: true, // ✅ NEW
       tokenValidation: true,
       autoClose: true,
       autoCloseTime: '5:00 PM Philippine Time Daily (17:00 Asia/Manila)'
@@ -1429,7 +1239,7 @@ app.listen(PORT, async () => {
   // ✅ START BOOKING STATUS LISTENER
   listenBookingStatusNotifications();
 
-  // ✅ START NEW BOOKING REQUEST LISTENER (notify admin)
+  // ✅ NEW: START NEW BOOKING REQUEST LISTENER (notify admin)
   listenNewBookingRequestNotifications();
 });
 
@@ -1468,3 +1278,4 @@ process.on('SIGINT', () => {
   console.log('👋 Shutting down gracefully...');
   process.exit(0);
 });
+
