@@ -141,7 +141,11 @@ async function getUserDisplayNameById(userId) {
 function shouldSkipRecipient({ senderId, senderRole, recipientUserId, recipientRole }) {
   if (!recipientUserId) return true;
 
-  if (senderId && recipientUserId === senderId) return true;
+  // ✅ CRITICAL FIX: Don't send notification to the sender themselves
+  if (senderId && recipientUserId === senderId) {
+    console.log(`🚫 Skipping notification for sender: ${senderId}`);
+    return true;
+  }
 
   if (senderRole === 'admin' && recipientRole === 'admin') return true;
   if (senderRole === 'super_admin' && recipientRole === 'super_admin') return true;
@@ -573,7 +577,7 @@ function listenNewBookingRequestNotifications() {
 // =========================
 app.post('/store-token', async (req, res) => {
   try {
-    const { token, userId, role, deviceInfo } = req.body;
+    const { token, userId, role, deviceInfo, isInChat } = req.body;
 
     if (!token || !userId) {
       return res.status(400).json({ error: 'Token and userId required' });
@@ -588,6 +592,7 @@ app.post('/store-token', async (req, res) => {
       userId,
       role: role || 'user',
       deviceInfo: deviceInfo || {},
+      isInChat: isInChat || false,
       lastUpdated: new Date().toISOString()
     });
 
@@ -596,15 +601,46 @@ app.post('/store-token', async (req, res) => {
       userId,
       role: role || 'user',
       platform: deviceInfo?.platform || 'unknown',
+      isInChat: isInChat || false,
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
 
-    console.log(`✅ Token stored for: ${userId} (${role || 'user'})`);
+    console.log(`✅ Token stored for: ${userId} (${role || 'user'}) - isInChat: ${isInChat || false}`);
     console.log(`📊 Total unique users (memory): ${userTokens.size}`);
 
     res.status(200).json({ success: true, userId, uniqueUsers: userTokens.size });
   } catch (error) {
     console.error('❌ Store error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =========================
+// ✅ NEW: Update chat status (user enters/exits chat)
+// =========================
+app.post('/update-chat-status', async (req, res) => {
+  try {
+    const { userId, isInChat } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'userId required' });
+    }
+
+    const userToken = userTokens.get(userId);
+    if (userToken) {
+      userToken.isInChat = isInChat || false;
+      userTokens.set(userId, userToken);
+    }
+
+    await db.collection('fcm_tokens').doc(userId).set({
+      isInChat: isInChat || false,
+      chatStatusUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    console.log(`✅ Chat status updated for ${userId}: isInChat=${isInChat}`);
+    res.status(200).json({ success: true, userId, isInChat });
+  } catch (error) {
+    console.error('❌ Update chat status error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -649,6 +685,7 @@ app.get('/token-count', async (req, res) => {
           userId: data.userId,
           role: data.role || 'user',
           deviceInfo: {},
+          isInChat: data.isInChat || false,
           lastUpdated: data.updatedAt
         });
       }
@@ -879,7 +916,7 @@ app.post('/send-shop-status', async (req, res) => {
 });
 
 // =========================
-// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED + FIXED DEDUPE)
+// ✅ GROUP CHAT NOTIFICATION (ROLE FILTERED + FIXED DEDUPE + NO SELF-NOTIFY + NO NOTIFY IF IN CHAT)
 // =========================
 async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, senderName, messageType, message }) {
   const senderRole = await getUserRoleById(senderId);
@@ -892,8 +929,15 @@ async function sendGroupChatNotificationRoleFiltered({ chatDocId, senderId, send
     const recipientUserId = (data.userId || doc.id || '').toString();
     const recipientRole = (data.role || 'user').toString();
     const token = (data.token || '').toString();
+    const isInChat = data.isInChat || false;
 
     if (!token || token.length < 100) return;
+
+    // ✅ Skip if recipient is currently viewing the chat
+    if (isInChat) {
+      console.log(`🚫 Skipping notification for ${recipientUserId} (currently in chat)`);
+      return;
+    }
 
     if (shouldSkipRecipient({
       senderId,
@@ -1199,6 +1243,8 @@ app.get('/', (req, res) => {
       groupChatNotifications: true,
       roleBasedGroupChatFiltering: true,
       noDuplicateNotifications: true,
+      noSelfNotifications: true,
+      noNotificationsWhenInChat: true,
       bookingStatusNotifications: true,
       bookingRequestNotificationsToAdmins: true,
       tokenValidation: true,
@@ -1239,6 +1285,7 @@ async function syncTokens() {
           userId: data.userId,
           role: data.role || 'user',
           deviceInfo: {},
+          isInChat: data.isInChat || false,
           lastUpdated: data.updatedAt
         });
       }
